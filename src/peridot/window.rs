@@ -6,7 +6,7 @@ use std::rc::{Rc, Weak};
 pub struct MainWindow<E: EngineEvents + 'static>
 {
     srv: Weak<PlatformServer<E>>, w: LateInit<NativeWindow<MainWindow<E>>>,
-    surface: LateInit<SurfaceInfo>, wrt: Discardable<WindowRenderTargets>
+    pub(super) surface: LateInit<SurfaceInfo>
 }
 impl<E: EngineEvents + 'static> MainWindow<E>
 {
@@ -14,15 +14,15 @@ impl<E: EngineEvents + 'static> MainWindow<E>
     {
         let this = Rc::new(MainWindow
         {
-            srv: Rc::downgrade(app),
-            w: LateInit::new(), surface: LateInit::new(), wrt: Discardable::new()
+            srv: Rc::downgrade(app), w: LateInit::new(), surface: LateInit::new()
         });
         this.w.init(NativeWindowBuilder::new(width, height, caption)
             .resizable(false).create_renderable(app, &this).unwrap());
         return this;
     }
     pub fn show(&self) { self.w.get().show(); }
-    pub fn backbuffers(&self) -> Ref<[br::ImageView]> { Ref::map(self.wrt.get(), |wrt| wrt.backbuffers()) }
+
+    pub fn backbuffer_format(&self) -> br::vk::VkFormat { self.surface.get().fmt.format }
 }
 impl<E: EngineEvents> WindowEventDelegate for MainWindow<E>
 {
@@ -32,16 +32,13 @@ impl<E: EngineEvents> WindowEventDelegate for MainWindow<E>
     {
         let srv = self.srv.upgrade().unwrap();
         let surface = SurfaceInfo::new(&srv, view).unwrap();
-        self.wrt.set(WindowRenderTargets::new(&srv.event_delegate().g.get(), &surface, view).unwrap());
+        srv.event_delegate().create_wrt(&surface, view).unwrap();
         self.surface.init(surface);
     }
-    fn render(&self)
-    {
-        self.srv.upgrade().unwrap().event_delegate().event_handler.update();
-    }
+    fn render(&self) { self.srv.upgrade().unwrap().event_delegate().do_update(); }
 }
 
-struct SurfaceInfo { obj: br::Surface, fmt: br::vk::VkSurfaceFormatKHR, pres_mode: br::PresentMode }
+pub(super) struct SurfaceInfo { obj: br::Surface, fmt: br::vk::VkSurfaceFormatKHR, pres_mode: br::PresentMode }
 impl SurfaceInfo
 {
     pub fn new<E: EngineEvents>(s: &PlatformServer<E>, w: &NativeView<MainWindow<E>>) -> br::Result<Self>
@@ -63,13 +60,13 @@ impl SurfaceInfo
     }
 }
 
-struct WindowRenderTargets
+pub(super) struct WindowRenderTargets
 {
     chain: br::Swapchain, bb: Vec<br::ImageView>
 }
 impl WindowRenderTargets
 {
-    pub fn new<WE: WindowEventDelegate>(g: &Graphics, s: &SurfaceInfo, v: &NativeView<WE>) -> br::Result<Self>
+    pub(super) fn new<WE: WindowEventDelegate>(g: &Graphics, s: &SurfaceInfo, v: &NativeView<WE>) -> br::Result<Self>
     {
         let si = g.adapter.surface_capabilities(&s.obj)?;
         let ext = br::Extent2D(
