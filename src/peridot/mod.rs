@@ -4,10 +4,11 @@ use std::rc::Rc;
 
 pub trait EngineEvents
 {
+    fn init(&self) {}
     fn update(&self) {}
-    fn render(&self) {}
 }
 impl EngineEvents for () {}
+impl<F: Fn()> EngineEvents for F { fn update(&self) { self(); } }
 pub struct Engine<E: EngineEvents + 'static>
 {
     appname: &'static str, appversion: (u32, u32, u32),
