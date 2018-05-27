@@ -9,10 +9,13 @@ mod window; use self::window::{MainWindow, SurfaceInfo, WindowRenderTargets};
 pub trait EngineEvents : Sized
 {
     fn init(&self, _e: &Engine<Self>) {}
-    fn update(&self, _e: &Engine<Self>) {}
+    fn update(&self, _e: &Engine<Self>, _on_backbuffer_of: u32) {}
 }
 impl EngineEvents for () {}
-impl<F: Fn(&Engine<F>)> EngineEvents for F { fn update(&self, e: &Engine<Self>) { self(e); } }
+impl<F: Fn(&Engine<F>, u32)> EngineEvents for F
+{
+    fn update(&self, e: &Engine<Self>, on_backbuffer_of: u32) { self(e, on_backbuffer_of); }
+}
 pub struct Engine<E: EngineEvents + 'static>
 {
     appname: &'static str, appversion: (u32, u32, u32),
@@ -32,12 +35,27 @@ impl<E: EngineEvents + 'static> Engine<E>
     }
     pub fn graphics(&self) -> Ref<Graphics> { self.g.get() }
     pub fn graphics_device(&self) -> Ref<br::Device> { Ref::map(self.g.get(), |g| &g.device) }
+    pub fn graphics_queue_family_index(&self) -> u32 { self.graphics().graphics_queue.family }
     pub fn backbuffer_format(&self) -> br::vk::VkFormat { self.w.get().backbuffer_format() }
     pub fn backbuffers(&self) -> Ref<[br::ImageView]> { Ref::map(self.wrt.get(), |wrt| wrt.backbuffers()) }
+
+    pub fn semaphore_acquiring_backbuffer(&self) -> Ref<br::Semaphore>
+    {
+        Ref::map(self.graphics(), |g| &g.acquiring_backbuffer)
+    }
+    pub fn present(&self, backbuffer_index: u32, occurence_after: &[&br::Semaphore]) -> br::Result<()>
+    {
+        let g = self.graphics();
+        self.wrt.get().present_on(&g.graphics_queue.q, backbuffer_index, occurence_after)
+    }
     
     pub fn submit_commands<Gen: FnOnce(&mut br::CmdRecord)>(&self, generator: Gen) -> br::Result<()>
     {
         self.g.get().submit_commands(generator)
+    }
+    pub fn submit_buffered_commands(&self, batches: &[br::SubmissionBatch], fence: &br::Fence) -> br::Result<()>
+    {
+        self.graphics().graphics_queue.q.submit(batches, Some(fence))
     }
 
     pub(self) fn create_wrt(&self, si: &SurfaceInfo, v: &NativeView<MainWindow<E>>) -> br::Result<()>
@@ -47,7 +65,10 @@ impl<E: EngineEvents + 'static> Engine<E>
     }
     pub(self) fn do_update(&self)
     {
-        self.event_handler.update(self);
+        let g = self.graphics();
+        let bb_index = self.wrt.get().acquire_next_backbuffer_index(None, br::CompletionHandler::Device(&g.acquiring_backbuffer))
+            .expect("Acquiring available backbuffer index");
+        self.event_handler.update(self, bb_index);
     }
 }
 impl<E: EngineEvents> EventDelegate for Engine<E>
@@ -63,7 +84,7 @@ impl<E: EngineEvents> EventDelegate for Engine<E>
     }
 }
 
-use std::cell::{Ref, RefCell};
+use std::cell::{Ref, RefMut, RefCell};
 pub struct LateInit<T>(RefCell<Option<T>>);
 impl<T> LateInit<T>
 {
@@ -77,6 +98,7 @@ impl<T> Discardable<T>
     pub fn new() -> Self { Discardable(RefCell::new(None)) }
     pub fn set(&self, v: T) { *self.0.borrow_mut() = v.into(); }
     pub fn get(&self) -> Ref<T> { Ref::map(self.0.borrow(), |x| x.as_ref().unwrap()) }
+    pub fn get_mut(&self) -> RefMut<T> { RefMut::map(self.0.borrow_mut(), |x| x.as_mut().unwrap()) }
     pub fn discard(&self) { *self.0.borrow_mut() = None; }
     pub fn is_available(&self) -> bool { self.0.borrow().is_some() }
 }
@@ -87,7 +109,8 @@ pub struct Graphics
     instance: br::Instance, pub(self) adapter: br::PhysicalDevice, device: br::Device,
     graphics_queue: Queue,
     #[cfg(debug_assertions)] _d: DebugReport,
-    cp_onetime_submit: br::CommandPool
+    cp_onetime_submit: br::CommandPool,
+    acquiring_backbuffer: br::Semaphore
 }
 impl Graphics
 {
@@ -113,6 +136,7 @@ impl Graphics
         
         return Ok(Graphics
         {
+            acquiring_backbuffer: br::Semaphore::new(&device)?,
             cp_onetime_submit: br::CommandPool::new(&device, gqf_index, true, false)?,
             graphics_queue: Queue { q: device.queue(gqf_index, 0), family: gqf_index },
             instance, adapter, device,
@@ -155,4 +179,41 @@ impl<'p> ::std::ops::Deref for LocalCommandBundle<'p>
 impl<'p> Drop for LocalCommandBundle<'p>
 {
     fn drop(&mut self) { self.1.free(&self.0[..]); }
+}
+
+pub struct CommandBundle(Vec<br::CommandBuffer>, br::CommandPool);
+impl ::std::ops::Deref for CommandBundle
+{
+    type Target = [br::CommandBuffer];
+    fn deref(&self) -> &[br::CommandBuffer] { &self.0 }
+}
+impl Drop for CommandBundle
+{
+    fn drop(&mut self) { self.1.free(&self.0[..]); }
+}
+impl CommandBundle
+{
+    pub fn new(d: &br::Device, queue_family_index: u32, count: usize) -> br::Result<Self>
+    {
+        let cp = br::CommandPool::new(d, queue_family_index, false, false)?;
+        return Ok(CommandBundle(cp.alloc(count as _, true)?, cp));
+    }
+}
+
+pub enum SubpassDependencyTemplates {}
+impl SubpassDependencyTemplates
+{
+    pub fn to_color_attachment_in(from_subpass: Option<u32>, occurence_subpass: u32, by_region: bool)
+        -> br::vk::VkSubpassDependency
+    {
+        br::vk::VkSubpassDependency
+        {
+            dstSubpass: occurence_subpass, srcSubpass: from_subpass.unwrap_or(br::vk::VK_SUBPASS_EXTERNAL),
+            dstStageMask: br::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT.0,
+            dstAccessMask: br::AccessFlags::COLOR_ATTACHMENT.write,
+            dependencyFlags: if by_region { br::vk::VK_DEPENDENCY_BY_REGION_BIT } else { 0 },
+            srcStageMask: br::PipelineStageFlags::TOP_OF_PIPE.0,
+            .. Default::default()
+        }
+    }
 }

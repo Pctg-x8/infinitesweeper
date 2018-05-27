@@ -88,4 +88,13 @@ impl WindowRenderTargets
     }
 
     pub fn backbuffers(&self) -> &[br::ImageView] { &self.bb }
+    pub fn acquire_next_backbuffer_index(&self, timeout: Option<u64>, completion_handler: br::CompletionHandler)
+        -> br::Result<u32>
+    {
+        self.chain.acquire_next(timeout, completion_handler)
+    }
+    pub fn present_on(&self, q: &br::Queue, index: u32, occurence_after: &[&br::Semaphore]) -> br::Result<()>
+    {
+        self.chain.queue_present(q, index, occurence_after)
+    }
 }
