@@ -3,6 +3,8 @@ use super::*;
 use bedrock as br;
 use std::rc::{Rc, Weak};
 
+use std::mem::{uninitialized, replace, forget};
+
 pub struct MainWindow<E: EngineEvents + 'static>
 {
     srv: Weak<PlatformServer<E>>, w: LateInit<NativeWindow<MainWindow<E>>>,
@@ -62,7 +64,7 @@ impl SurfaceInfo
 
 pub(super) struct WindowRenderTargets
 {
-    chain: br::Swapchain, bb: Vec<br::ImageView>
+    chain: br::Swapchain, bb: Vec<br::ImageView>, command_completions_for_backbuffer: Vec<StateFence>
 }
 impl WindowRenderTargets
 {
@@ -77,14 +79,16 @@ impl WindowRenderTargets
             .present_mode(s.pres_mode)
             .composite_alpha(br::CompositeAlpha::Opaque).pre_transform(br::SurfaceTransform::Identity)
             .create(&g.device)?;
+        
         let isr_c0 = br::ImageSubresourceRange::color(0, 0);
-        return Ok(WindowRenderTargets
-        {
-            bb: chain.get_images()?.into_iter()
-                .map(|x| x.create_view(None, None, &Default::default(), &isr_c0))
-                .collect::<Result<_, _>>()?,
-            chain
-        });
+        let images = chain.get_images()?;
+        let (mut bb, mut command_completions_for_backbuffer) = (Vec::with_capacity(images.len()), Vec::with_capacity(images.len()));
+        for x in images {
+            bb.push(x.create_view(None, None, &Default::default(), &isr_c0)?);
+            command_completions_for_backbuffer.push(StateFence::new(&g.device)?);
+        }
+
+        return Ok(WindowRenderTargets { command_completions_for_backbuffer, bb, chain });
     }
 
     pub fn backbuffers(&self) -> &[br::ImageView] { &self.bb }
@@ -97,4 +101,37 @@ impl WindowRenderTargets
     {
         self.chain.queue_present(q, index, occurence_after)
     }
+    pub fn command_completion_for_backbuffer_mut(&mut self, index: usize) -> &mut StateFence {
+        &mut self.command_completions_for_backbuffer[index]
+    }
+}
+impl Drop for WindowRenderTargets
+{
+    fn drop(&mut self)
+    {
+        for f in self.command_completions_for_backbuffer.iter_mut() { f.wait().unwrap(); }
+    }
+}
+
+pub enum StateFence { Signaled(br::Fence), Unsignaled(br::Fence) }
+impl StateFence {
+    pub fn new(d: &br::Device) -> br::Result<Self> { br::Fence::new(d, false).map(StateFence::Unsignaled) }
+    /// must be coherent with background API
+    pub unsafe fn signal(&mut self) {
+        let unsafe_ = replace(self, uninitialized());
+        forget(replace(self, StateFence::Signaled(unsafe_.take_object())));
+    }
+    /// must be coherent with background API
+    unsafe fn unsignal(&mut self) {
+        let mut unsafe_ = replace(self, uninitialized());
+        forget(replace(self, StateFence::Unsignaled(unsafe_.take_object())));
+    }
+
+    pub fn wait(&mut self) -> br::Result<()> {
+        if let StateFence::Signaled(ref f) = *self { f.wait()?; f.reset()?; }
+        unsafe { self.unsignal(); } return Ok(());
+    }
+
+    pub fn object(&self) -> &br::Fence { match *self { StateFence::Signaled(ref f) | StateFence::Unsignaled(ref f) => f } }
+    fn take_object(self) -> br::Fence { match self { StateFence::Signaled(f) | StateFence::Unsignaled(f) => f } }
 }

@@ -2,6 +2,8 @@ use bedrock as br; use bedrock::traits::*;
 use appframe::*;
 use std::rc::Rc;
 use std::borrow::Cow;
+use std::thread::{Thread, Builder as ThreadBuilder};
+use std::sync::Arc;
 
 mod window; use self::window::{MainWindow, SurfaceInfo, WindowRenderTargets};
 #[cfg(debug_assertions)] mod debug; #[cfg(debug_assertions)] use self::debug::DebugReport;
@@ -9,13 +11,13 @@ mod window; use self::window::{MainWindow, SurfaceInfo, WindowRenderTargets};
 pub trait EngineEvents : Sized
 {
     fn init(&self, _e: &Engine<Self>) {}
-    fn update(&self, _e: &Engine<Self>, _on_backbuffer_of: u32) {}
+    fn update(&self, _e: &Engine<Self>, _on_backbuffer_of: u32) -> br::SubmissionBatch { br::SubmissionBatch::default() }
 }
 impl EngineEvents for () {}
-impl<F: Fn(&Engine<F>, u32)> EngineEvents for F
+/*impl<F: Fn(&Engine<F>, u32) -> br::SubmissionBatch> EngineEvents for F
 {
-    fn update(&self, e: &Engine<Self>, on_backbuffer_of: u32) { self(e, on_backbuffer_of); }
-}
+    fn update(&self, e: &Engine<Self>, on_backbuffer_of: u32) -> br::SubmissionBatch { self(e, on_backbuffer_of) }
+}*/
 pub struct Engine<E: EngineEvents + 'static>
 {
     appname: &'static str, appversion: (u32, u32, u32),
@@ -38,16 +40,6 @@ impl<E: EngineEvents + 'static> Engine<E>
     pub fn graphics_queue_family_index(&self) -> u32 { self.graphics().graphics_queue.family }
     pub fn backbuffer_format(&self) -> br::vk::VkFormat { self.w.get().backbuffer_format() }
     pub fn backbuffers(&self) -> Ref<[br::ImageView]> { Ref::map(self.wrt.get(), |wrt| wrt.backbuffers()) }
-
-    pub fn semaphore_acquiring_backbuffer(&self) -> Ref<br::Semaphore>
-    {
-        Ref::map(self.graphics(), |g| &g.acquiring_backbuffer)
-    }
-    pub fn present(&self, backbuffer_index: u32, occurence_after: &[&br::Semaphore]) -> br::Result<()>
-    {
-        let g = self.graphics();
-        self.wrt.get().present_on(&g.graphics_queue.q, backbuffer_index, occurence_after)
-    }
     
     pub fn submit_commands<Gen: FnOnce(&mut br::CmdRecord)>(&self, generator: Gen) -> br::Result<()>
     {
@@ -65,10 +57,19 @@ impl<E: EngineEvents + 'static> Engine<E>
     }
     pub(self) fn do_update(&self)
     {
-        let g = self.graphics();
-        let bb_index = self.wrt.get().acquire_next_backbuffer_index(None, br::CompletionHandler::Device(&g.acquiring_backbuffer))
+        let g = self.graphics(); let mut wrt = self.wrt.get_mut();
+        let bb_index = wrt.acquire_next_backbuffer_index(None, br::CompletionHandler::Device(&g.acquiring_backbuffer))
             .expect("Acquiring available backbuffer index");
-        self.event_handler.update(self, bb_index);
+        {
+            let bbf = wrt.command_completion_for_backbuffer_mut(bb_index as _);
+            bbf.wait().expect("Waiting Previous command completion");
+            let mut fb_submission = self.event_handler.update(self, bb_index);
+            fb_submission.signal_semaphores.to_mut().push(&g.present_ordering);
+            fb_submission.wait_semaphores.to_mut().push((&g.acquiring_backbuffer, br::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT));
+            self.submit_buffered_commands(&[fb_submission], bbf.object()).expect("CommandBuffer Submission");
+            unsafe { bbf.signal(); }
+        }
+        wrt.present_on(&g.graphics_queue.q, bb_index, &[&g.present_ordering]).expect("Present Submission");
     }
 }
 impl<E: EngineEvents> EventDelegate for Engine<E>
@@ -83,6 +84,7 @@ impl<E: EngineEvents> EventDelegate for Engine<E>
         self.event_handler.init(self);
     }
 }
+impl<E: EngineEvents> Drop for Engine<E> { fn drop(&mut self) { self.graphics().device.wait().unwrap(); } }
 
 use std::cell::{Ref, RefMut, RefCell};
 pub struct LateInit<T>(RefCell<Option<T>>);
@@ -110,7 +112,7 @@ pub struct Graphics
     graphics_queue: Queue,
     #[cfg(debug_assertions)] _d: DebugReport,
     cp_onetime_submit: br::CommandPool,
-    acquiring_backbuffer: br::Semaphore
+    acquiring_backbuffer: br::Semaphore, present_ordering: br::Semaphore
 }
 impl Graphics
 {
@@ -136,6 +138,7 @@ impl Graphics
         
         return Ok(Graphics
         {
+            present_ordering: br::Semaphore::new(&device)?,
             acquiring_backbuffer: br::Semaphore::new(&device)?,
             cp_onetime_submit: br::CommandPool::new(&device, gqf_index, true, false)?,
             graphics_queue: Queue { q: device.queue(gqf_index, 0), family: gqf_index },

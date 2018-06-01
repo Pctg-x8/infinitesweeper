@@ -14,8 +14,6 @@ struct Game
 {
     rp: LateInit<br::RenderPass>, framebuffers: Discardable<Vec<br::Framebuffer>>,
     framebuffer_commands: Discardable<CommandBundle>,
-    present_ordering: LateInit<br::Semaphore>,
-    command_completions: Discardable<Vec<(br::Fence, bool)>>
 }
 impl Game
 {
@@ -23,8 +21,7 @@ impl Game
     {
         Engine::launch("InfiniteMinesweeper", (0, 1, 0), Game
         {
-            rp: LateInit::new(), framebuffers: Discardable::new(), framebuffer_commands: Discardable::new(),
-            present_ordering: LateInit::new(), command_completions: Discardable::new()
+            rp: LateInit::new(), framebuffers: Discardable::new(), framebuffer_commands: Discardable::new()
         });
     }
 }
@@ -42,8 +39,6 @@ impl EngineEvents for Game
         let framebuffers: Vec<_> = e.backbuffers().iter()
             .map(|v| br::Framebuffer::new(&rp, &[v], v.size(), 1).expect("Framebuffer")).collect();
         let framebuffer_size: br::vk::VkRect2D = br::Extent2D::clone(e.backbuffers()[0].size().as_ref()).into();
-        self.command_completions.set(e.backbuffers().iter()
-            .map(|_| (br::Fence::new(&e.graphics_device(), false).expect("Fence for RenderCommandCompletion"), false)).collect());
         
         e.submit_commands(|r|
         {
@@ -61,39 +56,15 @@ impl EngineEvents for Game
             rec.begin_render_pass(&rp, fb, framebuffer_size.clone(), &[br::ClearValue::Color([0.0; 4])], true)
                 .end_render_pass();
         }
-        self.present_ordering.init(br::Semaphore::new(&e.graphics_device()).expect("Semaphore"));
         
         self.rp.init(rp); self.framebuffers.set(framebuffers); self.framebuffer_commands.set(framebuffer_commands);
     }
-    fn update(&self, e: &Engine<Self>, on_backbuffer_of: u32)
+    fn update(&self, e: &Engine<Self>, on_backbuffer_of: u32) -> br::SubmissionBatch
     {
-        let sem_bb = e.semaphore_acquiring_backbuffer();
-        let pres_ordering = self.present_ordering.get();
         let bb_index = on_backbuffer_of as usize;
-        if self.command_completions.get()[bb_index].1
-        {
-            self.command_completions.get()[bb_index].0.wait().expect("Waiting Last Command Completion");
-            self.command_completions.get()[bb_index].0.reset().expect("Resetting Completion Fence");
-        }
-        let ref mut last_command_completion_pair = self.command_completions.get_mut()[bb_index];
-        e.submit_buffered_commands(&[br::SubmissionBatch
-        {
-            command_buffers: Cow::from(&self.framebuffer_commands.get()[bb_index..bb_index+1]),
-            wait_semaphores: Cow::Borrowed(&[(&sem_bb, br::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)]),
-            signal_semaphores: Cow::Borrowed(&[&pres_ordering]),
+        return br::SubmissionBatch {
+            command_buffers: Cow::from(self.framebuffer_commands.get()[bb_index..bb_index+1].to_owned()),
             .. Default::default()
-        }], &last_command_completion_pair.0).expect("CommandBuffer Submission");
-        last_command_completion_pair.1 = true;
-        e.present(on_backbuffer_of, &[&pres_ordering]).expect("Present Submission");
-    }
-}
-impl Drop for Game
-{
-    fn drop(&mut self)
-    {
-        for f in self.command_completions.get().iter().filter(|&(_, b)| *b).map(|&(ref a, _)| a)
-        {
-            f.wait().unwrap();
-        }
+        };
     }
 }
