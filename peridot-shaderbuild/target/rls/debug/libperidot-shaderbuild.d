@@ -1,0 +1,1 @@
+c:\Users\S.Percentage\infinitesweeper\peridot-shaderbuild\target\rls\debug\libperidot-shaderbuild.rmeta: C:\Users\S.Percentage\infinitesweeper\peridot-vertex-processing-pack\src\lib.rs C:\Users\S.Percentage\infinitesweeper\peridot-shaderbuild\src\main.rs C:\Users\S.Percentage\infinitesweeper\peridot-shaderbuild\src\decombiner.rs

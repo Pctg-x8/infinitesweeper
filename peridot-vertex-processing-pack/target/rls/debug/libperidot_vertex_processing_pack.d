@@ -1,0 +1,1 @@
+c:\Users\S.Percentage\infinitesweeper\peridot-vertex-processing-pack\target\rls\debug\libperidot_vertex_processing_pack.rmeta: C:\Users\S.Percentage\infinitesweeper\peridot-vertex-processing-pack\src\lib.rs

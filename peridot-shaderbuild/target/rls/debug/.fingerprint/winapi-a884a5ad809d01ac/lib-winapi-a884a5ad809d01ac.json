@@ -1,0 +1,1 @@
+{"rustc":6109964406885579391,"features":"[\"consoleapi\", \"errhandlingapi\", \"minwinbase\", \"minwindef\", \"processenv\", \"winbase\"]","target":14180823735688441773,"profile":14119667493710126711,"deps":[],"local":[{"Precalculated":"0.3.5"}],"rustflags":["--error-format=json"]}

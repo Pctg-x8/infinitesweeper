@@ -1,0 +1,1 @@
+C:\Users\S.Percentage\infinitesweeper\peridot-shaderbuild\target\debug\peridot-shaderbuild.pdb: C:\Users\S.Percentage\infinitesweeper\peridot-shaderbuild\src\decombiner.rs C:\Users\S.Percentage\infinitesweeper\peridot-shaderbuild\src\main.rs C:\Users\S.Percentage\infinitesweeper\peridot-vertex-processing-pack\src\lib.rs

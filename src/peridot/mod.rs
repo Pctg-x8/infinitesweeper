@@ -4,8 +4,10 @@ use std::rc::Rc;
 use std::borrow::Cow;
 use std::thread::{Thread, Builder as ThreadBuilder};
 use std::sync::Arc;
+use std::collections::BTreeMap;
 
 mod window; use self::window::{MainWindow, SurfaceInfo, WindowRenderTargets};
+mod resource; pub use self::resource::*;
 #[cfg(debug_assertions)] mod debug; #[cfg(debug_assertions)] use self::debug::DebugReport;
 
 pub trait EngineEvents : Sized
@@ -112,7 +114,8 @@ pub struct Graphics
     graphics_queue: Queue,
     #[cfg(debug_assertions)] _d: DebugReport,
     cp_onetime_submit: br::CommandPool,
-    acquiring_backbuffer: br::Semaphore, present_ordering: br::Semaphore
+    acquiring_backbuffer: br::Semaphore, present_ordering: br::Semaphore,
+    memory_type_index_cache: RefCell<BTreeMap<u32, u32>>
 }
 impl Graphics
 {
@@ -126,6 +129,7 @@ impl Graphics
         #[cfg(debug_assertions)] let _d = DebugReport::new(&instance)?;
         #[cfg(debug_assertions)] debug!("Debug reporting activated");
         let adapter = instance.iter_physical_devices()?.next().unwrap();
+        Self::diag_memory_properties(&adapter.memory_properties());
         let gqf_index = adapter.queue_family_properties().find_matching_index(br::QueueFlags::GRAPHICS)
             .expect("No graphics queue");
         let qci = br::DeviceQueueCreateInfo(gqf_index, vec![0.0]);
@@ -143,8 +147,45 @@ impl Graphics
             cp_onetime_submit: br::CommandPool::new(&device, gqf_index, true, false)?,
             graphics_queue: Queue { q: device.queue(gqf_index, 0), family: gqf_index },
             instance, adapter, device,
-            #[cfg(debug_assertions)] _d
+            #[cfg(debug_assertions)] _d,
+            memory_type_index_cache: RefCell::new(BTreeMap::new())
         });
+    }
+
+    fn diag_memory_properties(mp: &br::MemoryProperties) {
+        info!("Memory Heaps: ");
+        for (n, &br::vk::VkMemoryHeap { size, flags }) in mp.heaps().enumerate() {
+            let (mut nb, mut unit) = (size as f32, "bytes");
+            if nb >= 10000.0 { nb /= 1024.0; unit = "KB"; }
+            if nb >= 10000.0 { nb /= 1024.0; unit = "MB"; }
+            if nb >= 10000.0 { nb /= 1024.0; unit = "GB"; }
+            if (flags & br::vk::VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0 {
+                info!("  #{}: {} {} [DEVICE LOCAL]", n, nb, unit);
+            }
+            else {
+                info!("  #{}: {} {}", n, nb, unit);
+            }
+        }
+        info!("Memory Types: ");
+        for (n, ty) in mp.types().enumerate() {
+            let mut flags = Vec::with_capacity(6);
+            if (ty.propertyFlags & br::vk::VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0 { flags.push("DEVICE LOCAL"); }
+            if (ty.propertyFlags & br::vk::VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0 { flags.push("HOST VISIBLE"); }
+            if (ty.propertyFlags & br::vk::VK_MEMORY_PROPERTY_HOST_CACHED_BIT) != 0 { flags.push("CACHED"); }
+            if (ty.propertyFlags & br::vk::VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0 { flags.push("COHERENT"); }
+            if (ty.propertyFlags & br::vk::VK_MEMORY_PROPERTY_PROTECTED_BIT) != 0 { flags.push("PROTECTED"); }
+            if (ty.propertyFlags & br::vk::VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT) != 0 { flags.push("LAZILY ALLOCATED"); }
+            info!("  {}: [{}] in heap #{}", n, flags.join("/"), ty.heapIndex);
+        }
+    }
+
+    pub(self) fn memory_type_index_for(&self, mask: br::MemoryPropertyFlags) -> Option<u32> {
+        if let Some(&mi) = self.memory_type_index_cache.borrow().get(&mask.bits()) { return Some(mi); }
+        if let Some(n) = self.adapter.memory_properties().find_type_index(mask, br::MemoryPropertyFlags::LAZILY_ALLOCATED.host_cached()) {
+            self.memory_type_index_cache.borrow_mut().insert(mask.bits(), n);
+            return Some(n);
+        }
+        else { return None; }
     }
 
     pub(self) fn presentation_support_on<S: BedrockRenderingServer>(&self, s: &S) -> bool
@@ -217,6 +258,137 @@ impl SubpassDependencyTemplates
             dependencyFlags: if by_region { br::vk::VK_DEPENDENCY_BY_REGION_BIT } else { 0 },
             srcStageMask: br::PipelineStageFlags::TOP_OF_PIPE.0,
             .. Default::default()
+        }
+    }
+}
+
+use peridot_vertex_processing_pack::PvpContainer;
+pub struct PvpShaderModules {
+    bindings: Vec<br::vk::VkVertexInputBindingDescription>, attributes: Vec<br::vk::VkVertexInputAttributeDescription>,
+    vertex: br::ShaderModule, fragment: Option<br::ShaderModule>
+}
+impl PvpShaderModules {
+    pub fn new(device: &br::Device, container: PvpContainer) -> br::Result<Self> {
+        Ok(PvpShaderModules {
+            vertex: br::ShaderModule::from_memory(device, &container.vertex_shader)?,
+            fragment: if let Some(b) = container.fragment_shader {
+                Some(br::ShaderModule::from_memory(device, &b)?)
+            }
+            else { None },
+            bindings: container.vertex_bindings, attributes: container.vertex_attributes
+        })
+    }
+    pub fn generate_vps(&self, primitive_topo: br::vk::VkPrimitiveTopology) -> br::VertexProcessingStages {
+        let mut r = br::VertexProcessingStages::new(br::PipelineShader::new(&self.vertex, "main", None),
+            &self.bindings, &self.attributes, primitive_topo);
+        if let Some(ref f) = self.fragment { r.fragment_shader(br::PipelineShader::new(f, "main", None)); }
+        return r;
+    }
+}
+
+pub struct LayoutedPipeline(br::Pipeline, Rc<br::PipelineLayout>);
+impl LayoutedPipeline {
+    pub fn combine(p: br::Pipeline, layout: &Rc<br::PipelineLayout>) -> Self {
+        LayoutedPipeline(p, layout.clone())
+    }
+    pub fn pipeline(&self) -> &br::Pipeline { &self.0 }
+    pub fn layout(&self) -> &br::PipelineLayout { &self.1 }
+}
+
+use br::vk::VkBufferCopy;
+use std::cmp::{PartialEq, Eq, PartialOrd, Ord, Ordering};
+use std::hash::{Hash, Hasher};
+use std::collections::HashMap;
+use std::ops::Range;
+#[derive(Clone)] pub struct ResourceKey<T: br::VkHandle>(T);
+impl PartialEq for ResourceKey<Buffer> {
+    fn eq(&self, other: &Self) -> bool { (self.0.native_ptr() as u64).eq(&(other.0.native_ptr() as u64)) }
+}
+impl PartialEq for ResourceKey<Image> {
+    fn eq(&self, other: &Self) -> bool { (self.0.native_ptr() as u64).eq(&(other.0.native_ptr() as u64)) }
+}
+impl PartialOrd for ResourceKey<Buffer> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        (self.0.native_ptr() as u64).partial_cmp(&(other.0.native_ptr() as u64))
+    }
+}
+impl PartialOrd for ResourceKey<Image> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        (self.0.native_ptr() as u64).partial_cmp(&(other.0.native_ptr() as u64))
+    }
+}
+impl Eq for ResourceKey<Buffer> {}
+impl Ord for ResourceKey<Buffer> { fn cmp(&self, other: &Self) -> Ordering { self.partial_cmp(other).unwrap() } }
+impl Eq for ResourceKey<Image> {}
+impl Ord for ResourceKey<Image> { fn cmp(&self, other: &Self) -> Ordering { self.partial_cmp(other).unwrap() } }
+impl Hash for ResourceKey<Buffer> { fn hash<H: Hasher>(&self, hasher: &mut H) { self.0.native_ptr().hash(hasher) } }
+impl Hash for ResourceKey<Image> { fn hash<H: Hasher>(&self, hasher: &mut H) { self.0.native_ptr().hash(hasher) } }
+pub struct ReadyResourceBarriers {
+    buffer: Vec<(Buffer, Range<u64>, br::vk::VkAccessFlags)>,
+    image: Vec<(Image, br::ImageSubresourceRange, br::ImageLayout)>
+}
+impl ReadyResourceBarriers {
+    fn new() -> Self { ReadyResourceBarriers { buffer: Vec::new(), image: Vec::new() } }
+}
+pub struct TransferBatch {
+    barrier_range_src: BTreeMap<ResourceKey<Buffer>, Range<u64>>,
+    barrier_range_dst: BTreeMap<ResourceKey<Buffer>, Range<u64>>,
+    copy_buffers: HashMap<(ResourceKey<Buffer>, ResourceKey<Buffer>), Vec<VkBufferCopy>>,
+    ready_barriers: BTreeMap<br::PipelineStageFlags, ReadyResourceBarriers>
+}
+impl TransferBatch {
+    pub fn new() -> Self {
+        TransferBatch {
+            barrier_range_src: BTreeMap::new(), barrier_range_dst: BTreeMap::new(),
+            copy_buffers: HashMap::new(),
+            ready_barriers: BTreeMap::new()
+        }
+    }
+    pub fn add_copying_buffer(&mut self, src: (&Buffer, u64), dst: (&Buffer, u64), bytes: u64) {
+        trace!("Registering COPYING-BUFFER: ({}, {}) -> {} bytes", src.1, dst.1, bytes);
+        let (sk, dk) = (ResourceKey(src.0.clone()), ResourceKey(dst.0.clone()));
+        Self::update_barrier_range_for(&mut self.barrier_range_src, sk.clone(), src.1 .. src.1 + bytes);
+        Self::update_barrier_range_for(&mut self.barrier_range_dst, dk.clone(), dst.1 .. dst.1 + bytes);
+        self.copy_buffers.entry((sk, dk)).or_insert_with(Vec::new)
+            .push(VkBufferCopy { srcOffset: src.1 as _, dstOffset: dst.1 as _, size: bytes as _ })
+    }
+    pub fn add_mirroring_buffer(&mut self, src: &Buffer, dst: &Buffer, offset: u64, bytes: u64) {
+        self.add_copying_buffer((src, offset), (dst, offset), bytes);
+    }
+    pub fn add_buffer_graphics_ready(&mut self, dest_stage: br::PipelineStageFlags,
+        res: &Buffer, byterange: Range<u64>, access_grants: br::vk::VkAccessFlags) {
+        self.ready_barriers.entry(dest_stage).or_insert_with(ReadyResourceBarriers::new)
+            .buffer.push((res.clone(), byterange, access_grants));
+    }
+    
+    fn update_barrier_range_for(map: &mut BTreeMap<ResourceKey<Buffer>, Range<u64>>, k: ResourceKey<Buffer>, new_range: Range<u64>) {
+        let r = map.entry(k).or_insert_with(|| new_range.clone());
+        r.start = r.start.min(new_range.start);
+        r.end = r.end.max(new_range.end);
+    }
+}
+/// Sinking Commands into CommandBuffers
+impl TransferBatch {
+    pub fn sink_transfer_commands(&self, r: &mut br::CmdRecord) {
+        let src_barriers = self.barrier_range_src.iter()
+            .map(|(b, r)| br::BufferMemoryBarrier::new(
+                &b.0, r.start as _ .. r.end as _, br::AccessFlags::HOST.write, br::AccessFlags::TRANSFER.read));
+        let dst_barriers = self.barrier_range_dst.iter()
+            .map(|(b, r)| br::BufferMemoryBarrier::new(
+                &b.0, r.start as _ .. r.end as _, 0, br::AccessFlags::TRANSFER.write));
+        let barriers: Vec<_> = src_barriers.chain(dst_barriers).collect();
+        
+        r.pipeline_barrier(br::PipelineStageFlags::HOST, br::PipelineStageFlags::TRANSFER, false,
+            &[], &barriers, &[]);
+        for (&(ref s, ref d), ref rs) in &self.copy_buffers { r.copy_buffer(&s.0, &d.0, &rs); }
+    }
+    pub fn sink_graphics_ready_commands(&self, r: &mut br::CmdRecord) {
+        for (&stg, &ReadyResourceBarriers { ref buffer, .. }) in &self.ready_barriers {
+            let buf_barriers: Vec<_> = buffer.iter()
+                .map(|&(ref r, ref br, a)| br::BufferMemoryBarrier::new(&r, br.start as _ .. br.end as _,
+                    br::AccessFlags::TRANSFER.read, a)).collect();
+            r.pipeline_barrier(br::PipelineStageFlags::TRANSFER, stg, false,
+                &[], &buf_barriers, &[]);
         }
     }
 }

@@ -2,6 +2,7 @@
 name = "infinitesweeper"
 version = "0.1.0"
 authors = ["S.Percentage <Syn.Tri.Naga@gmail.com>"]
+build = "build.rs"
 
 [dependencies]
 appframe = { git = "https://github.com/Pctg-x8/appframe", features = ["with_bedrock"] }
@@ -9,3 +10,6 @@ bedrock = { git = "https://github.com/Pctg-x8/bedrock", features = ["Presentatio
 libc = "0.2"
 log = "0.4"
 env_logger = "0.5"
+regex = "1.0"
+bitflags = "1.0"
+peridot-vertex-processing-pack = { path = "peridot-vertex-processing-pack" }
