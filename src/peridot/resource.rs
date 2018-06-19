@@ -38,6 +38,12 @@ impl<'g> BufferPrealloc<'g> {
         let obj = br::BufferDesc::new(self.total, self.usage).create(&self.g.device)?;
         return Ok(obj);
     }
+    pub fn build_transferred(&self) -> br::Result<br::Buffer> {
+        br::BufferDesc::new(self.total, self.usage.transfer_dest()).create(&self.g.device)
+    }
+    pub fn build_upload(&self) -> br::Result<br::Buffer> {
+        br::BufferDesc::new(self.total, self.usage.transfer_src()).create(&self.g.device)
+    }
 
     pub fn add(&mut self, content: BufferContent) -> usize {
         self.usage = content.usage(self.usage);

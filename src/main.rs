@@ -66,8 +66,8 @@ impl EngineEvents for Game
 
             let mut bp = BufferPrealloc::new(&g);
             bp.add(BufferContent::vertex::<[[f32; 4]; 4]>());
-            let buf = bp.build().unwrap();
-            let buf_upload = bp.build().unwrap();
+            let buf = bp.build_transferred().unwrap();
+            let buf_upload = bp.build_upload().unwrap();
             let buf = MemoryBadget::new(&e.graphics()).alloc_with_buffer(buf).unwrap();
             let buf_upload = MemoryBadget::new(&e.graphics()).alloc_with_buffer_host_visible(buf_upload).unwrap();
             buf_upload.guard_map(bp.total_size(), |m| unsafe {
