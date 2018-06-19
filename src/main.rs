@@ -18,7 +18,8 @@ fn main() { env_logger::init(); Game::launch(); }
 struct Game
 {
     rp: LateInit<br::RenderPass>, framebuffers: Discardable<Vec<br::Framebuffer>>,
-    framebuffer_commands: Discardable<CommandBundle>, pass_gp: LateInit<LayoutedPipeline>
+    framebuffer_commands: Discardable<CommandBundle>, pass_gp: LateInit<LayoutedPipeline>,
+    buffer: LateInit<Buffer>
 }
 impl Game
 {
@@ -27,7 +28,7 @@ impl Game
         Engine::launch("InfiniteMinesweeper", (0, 1, 0), Game
         {
             rp: LateInit::new(), framebuffers: Discardable::new(), framebuffer_commands: Discardable::new(),
-            pass_gp: LateInit::new()
+            pass_gp: LateInit::new(), buffer: LateInit::new()
         });
     }
 }
@@ -61,21 +62,16 @@ impl EngineEvents for Game
             .create(&e.graphics_device(), None).unwrap();
         let pass_gp = LayoutedPipeline::combine(pass_gp, &empty_layout);
 
+        let (restack, buf);
         {
             let g = e.graphics();
 
             let mut bp = BufferPrealloc::new(&g);
-            bp.add(BufferContent::vertex::<[[f32; 4]; 4]>());
-            let buf = bp.build_transferred().unwrap();
+            restack = ResourceStack::init(&mut bp);
             let buf_upload = bp.build_upload().unwrap();
-            let buf = MemoryBadget::new(&e.graphics()).alloc_with_buffer(buf).unwrap();
+            buf = MemoryBadget::new(&e.graphics()).alloc_with_buffer(bp.build_transferred().unwrap()).unwrap();
             let buf_upload = MemoryBadget::new(&e.graphics()).alloc_with_buffer_host_visible(buf_upload).unwrap();
-            buf_upload.guard_map(bp.total_size(), |m| unsafe {
-                m.get_mut::<[[f32; 4]; 4]>(0).clone_from_slice(&[
-                    [-0.5, -0.5, 0.0, 1.0], [0.5, -0.5, 0.0, 1.0],
-                    [-0.5,  0.5, 0.0, 1.0], [0.5,  0.5, 0.0, 1.0]
-                ]);
-            }).unwrap();
+            buf_upload.guard_map(bp.total_size(), |m| restack.init_data(m)).unwrap();
             let mut tb = TransferBatch::new();
             tb.add_mirroring_buffer(&buf_upload, &buf, 0, bp.total_size() as _);
 
@@ -95,12 +91,14 @@ impl EngineEvents for Game
         for (fb, cb) in framebuffers.iter().zip(framebuffer_commands.iter())
         {
             let mut rec = cb.begin().expect("Beginning Recording commands");
-            rec.begin_render_pass(&rp, fb, framebuffer_size.clone(), &[br::ClearValue::Color([0.0; 4])], true)
-                .end_render_pass();
+            rec.begin_render_pass(&rp, fb, framebuffer_size.clone(), &[br::ClearValue::Color([0.0; 4])], true);
+            pass_gp.bind(&mut rec);
+            restack.draw_unit_rect(&buf, &mut rec);
+            rec.end_render_pass();
         }
         
         self.rp.init(rp); self.framebuffers.set(framebuffers); self.framebuffer_commands.set(framebuffer_commands);
-        self.pass_gp.init(pass_gp);
+        self.pass_gp.init(pass_gp); self.buffer.init(buf);
     }
     fn update(&self, e: &Engine<Self>, on_backbuffer_of: u32) -> br::SubmissionBatch
     {
@@ -109,5 +107,27 @@ impl EngineEvents for Game
             command_buffers: Cow::from(self.framebuffer_commands.get()[bb_index..bb_index+1].to_owned()),
             .. Default::default()
         };
+    }
+}
+
+pub struct ResourceStack {
+    unit_rect_vb: usize
+}
+impl ResourceStack {
+    pub fn init(bp: &mut BufferPrealloc) -> Self {
+        ResourceStack {
+            unit_rect_vb: bp.add(BufferContent::vertex::<[[f32; 4]; 4]>())
+        }
+    }
+    pub fn init_data(&self, mem: &br::MappedMemoryRange) {
+        unsafe {
+            mem.get_mut::<[[f32; 4]; 4]>(self.unit_rect_vb).clone_from_slice(&[
+                [-0.5, -0.5, 0.0, 1.0], [-0.5, 0.5, 0.0, 1.0],
+                [ 0.5, -0.5, 0.0, 1.0], [ 0.5, 0.5, 0.0, 1.0]
+            ]);
+        }
+    }
+    pub fn draw_unit_rect(&self, buf: &br::Buffer, rec: &mut br::CmdRecord) {
+        rec.bind_vertex_buffers(0, &[(buf, self.unit_rect_vb)]).draw(4, 1, 0, 0);
     }
 }

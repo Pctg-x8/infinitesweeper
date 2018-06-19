@@ -1,10 +1,10 @@
 // Combined Shader
 
 VertexInput {
-    Binding 0 [PerVertex] { pos, vcol: vec4; }
+    Binding 0 [PerVertex] { pos: vec4; }
 }
 VertexShader {
-    RasterPosition = pos; col = vcol;
+    RasterPosition = pos; col = vec4(1.0f, 1.0f, 1.0f, 1.0f);
 }
 FragmentShader {
     Target[0] = col;
