@@ -62,12 +62,14 @@ impl<'g> MemoryBadget<'g> {
     }
     pub fn alloc_with_buffer(self, buffer: br::Buffer) -> br::Result<Buffer> {
         let breq = buffer.requirements();
+        info!(target: "peridot", "Allocating Device Memory: {} bytes", breq.size);
         let mem: Rc<_> = br::DeviceMemory::allocate(&self.g.device, breq.size as _,
             self.g.memory_type_index_for(br::MemoryPropertyFlags::DEVICE_LOCAL).expect("No Device-Local memory"))?.into();
         return Buffer::bound(buffer, &mem, 0);
     }
     pub fn alloc_with_buffer_host_visible(self, buffer: br::Buffer) -> br::Result<Buffer> {
         let breq = buffer.requirements();
+        info!(target: "peridot", "Allocating Uploading Memory: {} bytes", breq.size);
         let mem: Rc<_> = br::DeviceMemory::allocate(&self.g.device, breq.size as _,
             self.g.memory_type_index_for(br::MemoryPropertyFlags::HOST_VISIBLE).expect("No Host-Visible memory"))?.into();
         return Buffer::bound(buffer, &mem, 0);

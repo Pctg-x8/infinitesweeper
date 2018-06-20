@@ -4,9 +4,10 @@ use bedrock as br;
 use std::str::FromStr;
 use std::mem::{align_of, size_of};
 use regex::Regex;
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DeclarationOps { VertexInput, VertexShader, FragmentShader, Varyings }
+pub enum DeclarationOps { VertexInput, VertexShader, FragmentShader, Varyings, SpecConstant, Uniform }
 
 pub struct Tokenizer<'s>(&'s str);
 impl<'s> Tokenizer<'s> {
@@ -49,6 +50,9 @@ impl<'s> Tokenizer<'s> {
     pub fn glsl_type_ascription(&mut self) -> Option<&'s str> {
         self.strip_ignores();
         if !self.strip_prefix(":") { return None; }
+        return self.glsl_represents_until_decl_end();
+    }
+    pub fn glsl_represents_until_decl_end(&mut self) -> Option<&'s str> {
         self.strip_ignores();
         let glsl_strip_bytes = self.0.chars().take_while(|&c| c != ';' && c != '@').fold(0, |a, c| a + c.len_utf8());
         if glsl_strip_bytes == 0 { return None; }
@@ -60,9 +64,11 @@ impl<'s> Tokenizer<'s> {
     pub fn declaration_op(&mut self) -> Option<DeclarationOps> {
         self.strip_ignores();
         if self.strip_prefix("FragmentShader") { return Some(DeclarationOps::FragmentShader); }
+        if self.strip_prefix("SpecConstant") { return Some(DeclarationOps::SpecConstant); }
         if self.strip_prefix("VertexShader") { return Some(DeclarationOps::VertexShader); }
         if self.strip_prefix("VertexInput") { return Some(DeclarationOps::VertexInput); }
         if self.strip_prefix("Varyings") { return Some(DeclarationOps::Varyings); }
+        if self.strip_prefix("Uniform") { return Some(DeclarationOps::Uniform); }
         return None;
     }
     pub fn shader_stage(&mut self) -> Option<br::ShaderStage> {
@@ -70,6 +76,13 @@ impl<'s> Tokenizer<'s> {
         if self.strip_prefix("FragmentShader") { return Some(br::ShaderStage::FRAGMENT); }
         if self.strip_prefix("VertexShader") { return Some(br::ShaderStage::VERTEX); }
         return None;
+    }
+    pub fn bracketed_stage(&mut self) -> Option<br::ShaderStage> {
+        self.strip_ignores();
+        if !self.bracket_start() { return None; }
+        let st = if let Some(s) = self.shader_stage() { s } else { return None; };
+        if !self.bracket_end() { return None; }
+        return Some(st);
     }
     pub fn codeblock(&mut self) -> Option<&'s str> {
         self.strip_ignores();
@@ -102,6 +115,26 @@ impl<'s> Tokenizer<'s> {
         }
         else { br::vk::VK_VERTEX_INPUT_RATE_VERTEX };
         return (index, irate).into();
+    }
+    /// `SpecConstant` v <BracketedStage> `(` <IndexNumber> `)`
+    pub fn spec_constant_header_rest(&mut self) -> Option<(br::ShaderStage, usize)> {
+        self.strip_ignores();
+        let stg = if let Some(s) = self.bracketed_stage() { s } else { return None; };
+        if !self.strip_ignores().strip_prefix("(") { return None; }
+        let idx = if let Some(n) = self.index_number() { n } else { return None; };
+        if !self.strip_ignores().strip_prefix(")") { return None; }
+        return Some((stg, idx));
+    }
+    /// `Uniform` v <BracketedStage> `(` <IndexNumber> `,` <IndexNumber> `)`
+    pub fn uniform_header_rest(&mut self) -> Option<(br::ShaderStage, usize, usize)> {
+        self.strip_ignores();
+        let stg = if let Some(s) = self.bracketed_stage() { s } else { return None; };
+        if !self.strip_ignores().strip_prefix("(") { return None; }
+        let set = if let Some(n) = self.index_number() { n } else { return None; };
+        if !self.strip_ignores().strip_prefix(",") { return None; }
+        let binding = if let Some(n) = self.index_number() { n } else { return None; };
+        if !self.strip_ignores().strip_prefix(")") { return None; }
+        return Some((stg, set, binding));
     }
 
     pub fn index_number(&mut self) -> Option<usize> {
@@ -157,7 +190,9 @@ fn align2(x: usize, a: usize) -> usize { (x + (a - 1)) & !(a - 1) }
 pub enum ToplevelBlock<'s> {
     VertexInput(Vec<(usize, BindingBlock<'s>)>),
     ShaderCode(br::ShaderStage, &'s str),
-    Varying(br::ShaderStage, br::ShaderStage, Vec<Variable<'s>>)
+    Varying(br::ShaderStage, br::ShaderStage, Vec<Variable<'s>>),
+    SpecConstant(br::ShaderStage, usize, &'s str, &'s str),
+    Uniform(br::ShaderStage, usize, usize, &'s str, &'s str)
 }
 impl<'s> Tokenizer<'s> {
     pub fn binding_block(&mut self) -> Option<(usize, BindingBlock<'s>)> {
@@ -197,6 +232,20 @@ impl<'s> Tokenizer<'s> {
         }
         return (src, dst, vars);
     }
+    pub fn spec_constant(&mut self) -> ToplevelBlock<'s> {
+        let (stg, idx) = self.spec_constant_header_rest().expect("ShaderStage then ConstantID required");
+        let id = self.strip_ignores().strip_ident().expect("Identifier required");
+        if !self.strip_ignores().strip_prefix("=") { panic!("Equal required"); }
+        let init = self.glsl_represents_until_decl_end().expect("Initial value required");
+        if !self.strip_ignores().declaration_end() { panic!("; required at the end of each declaration"); }
+        return ToplevelBlock::SpecConstant(stg, idx, id, init);
+    }
+    pub fn uniform(&mut self) -> ToplevelBlock<'s> {
+        let (stg, set, binding) = self.uniform_header_rest().expect("ShaderStage then pair of descriptor set and binding indices are required");
+        let id = self.strip_ignores().strip_ident().expect("Identifier for GLSL TypeName required");
+        let code = self.codeblock().expect("GLSL CodeBlock required");
+        return ToplevelBlock::Uniform(stg, set, binding, id, code);
+    }
 
     pub fn toplevel_block(&mut self) -> Option<ToplevelBlock<'s>> {
         match self.declaration_op() {
@@ -212,6 +261,8 @@ impl<'s> Tokenizer<'s> {
                 let (src, dst, vars) = self.varying();
                 return ToplevelBlock::Varying(src, dst, vars).into();
             },
+            Some(DeclarationOps::SpecConstant) => self.spec_constant().into(),
+            Some(DeclarationOps::Uniform) => self.uniform().into(),
             _ => None
         }
     }
@@ -229,14 +280,18 @@ impl<'s> Tokenizer<'s> {
 pub struct CombinedShader<'s> {
     vertex_input: Vec<(usize, BindingBlock<'s>)>,
     vertex_shader_code: &'s str, fragment_shader_code: Option<&'s str>,
-    varyings_between_shaders: Vec<(br::ShaderStage, br::ShaderStage, Vec<Variable<'s>>)>
+    varyings_between_shaders: Vec<(br::ShaderStage, br::ShaderStage, Vec<Variable<'s>>)>,
+    spec_constants_per_stage: BTreeMap<br::ShaderStage, BTreeMap<usize, (&'s str, &'s str)>>,
+    uniforms_per_stage: BTreeMap<br::ShaderStage, BTreeMap<(usize, usize), (&'s str, &'s str)>>
 }
 impl<'s> CombinedShader<'s> {
     pub fn from_parsed_blocks(blocks: Vec<ToplevelBlock<'s>>) -> Self {
         let mut cs = CombinedShader {
             vertex_input: Vec::new(),
             vertex_shader_code: "", fragment_shader_code: None,
-            varyings_between_shaders: Vec::new()
+            varyings_between_shaders: Vec::new(),
+            spec_constants_per_stage: BTreeMap::new(),
+            uniforms_per_stage: BTreeMap::new()
         };
 
         for tb in blocks {
@@ -252,6 +307,16 @@ impl<'s> CombinedShader<'s> {
                 },
                 ToplevelBlock::ShaderCode(ss, _) => panic!("Unsupported Shader Stage: {:08b}", ss.0),
                 ToplevelBlock::Varying(src, dst, vars) => cs.varyings_between_shaders.push((src, dst, vars)),
+                ToplevelBlock::SpecConstant(stg, idx, name, init) => {
+                    let storage = cs.spec_constants_per_stage.entry(stg).or_insert_with(BTreeMap::new);
+                    if storage.contains_key(&idx) { panic!("Multiple Definitions of SpecConstant for same id in same stage"); }
+                    storage.insert(idx, (name, init));
+                },
+                ToplevelBlock::Uniform(stg, set, binding, name, init) => {
+                    let storage = cs.uniforms_per_stage.entry(stg).or_insert_with(BTreeMap::new);
+                    if storage.contains_key(&(set, binding)) { panic!("Multiple Definitions of Uniform for same (set, binding) in same stage"); }
+                    storage.insert((set, binding), (name, init));
+                }
             }
         }
         if cs.vertex_shader_code.is_empty() { panic!("VertexShader is not specified"); }
@@ -276,6 +341,17 @@ impl<'s> CombinedShader<'s> {
         // gl_Positionの宣言を追加
         if self.vertex_shader_code.contains("RasterPosition") {
             code += "out gl_PerVertex { out vec4 gl_Position; };\n";
+        }
+        // 定数(uniformとspecconstant)
+        if let Some(cons) = self.spec_constants_per_stage.get(&br::ShaderStage::VERTEX) {
+            for (id, &(name, init)) in cons.iter() {
+                code += &format!("layout(constant_id = {}) const float {} = {};\n", id, name, init);
+            }
+        }
+        if let Some(ufs) = self.uniforms_per_stage.get(&br::ShaderStage::VERTEX) {
+            for (&(set, bindings), &(name, cont)) in ufs.iter() {
+                code += &format!("layout(set = {}, binding = {}) uniform {} {{{}}};\n", set, bindings, name, cont);
+            }
         }
         code += "\n";
         // main
@@ -302,6 +378,17 @@ impl<'s> CombinedShader<'s> {
             }
             else { break; };
             fragment_code = fragment_code.replace(&format!("Target[{}]", replace_index), &format!("sv_target_{}", replace_index));
+        }
+        // 定数(uniformとspecconstant)
+        if let Some(cons) = self.spec_constants_per_stage.get(&br::ShaderStage::FRAGMENT) {
+            for (id, &(name, init)) in cons.iter() {
+                code += &format!("layout(constant_id = {}) const float {} = {};\n", id, name, init);
+            }
+        }
+        if let Some(ufs) = self.uniforms_per_stage.get(&br::ShaderStage::FRAGMENT) {
+            for (&(set, bindings), &(name, cont)) in ufs.iter() {
+                code += &format!("layout(set = {}, binding = {}) uniform {} {{{}}};\n", set, bindings, name, cont);
+            }
         }
         code += "\n";
         // main

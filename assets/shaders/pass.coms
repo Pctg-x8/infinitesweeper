@@ -13,3 +13,8 @@ FragmentShader {
 Varyings VertexShader -> FragmentShader {
     col: vec4;
 }
+
+SpecConstant[VertexShader](0) ScreenAspectWH = 1.0f;
+Uniform[VertexShader](0, 0) VertexPlacement {
+    vec2 offs, scale;
+}
