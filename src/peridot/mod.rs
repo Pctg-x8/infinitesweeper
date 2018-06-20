@@ -1,9 +1,9 @@
+#![allow(dead_code)]
+
 use bedrock as br; use bedrock::traits::*;
 use appframe::*;
 use std::rc::Rc;
 use std::borrow::Cow;
-use std::thread::{Thread, Builder as ThreadBuilder};
-use std::sync::Arc;
 use std::collections::BTreeMap;
 
 mod window; use self::window::{MainWindow, SurfaceInfo, WindowRenderTargets};

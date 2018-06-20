@@ -123,7 +123,7 @@ impl StateFence {
     }
     /// must be coherent with background API
     unsafe fn unsignal(&mut self) {
-        let mut unsafe_ = replace(self, uninitialized());
+        let unsafe_ = replace(self, uninitialized());
         forget(replace(self, StateFence::Unsignaled(unsafe_.take_object())));
     }
 

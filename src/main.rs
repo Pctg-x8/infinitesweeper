@@ -4,7 +4,7 @@ extern crate libc;
 #[macro_use] extern crate log;
 extern crate env_logger;
 extern crate regex;
-#[macro_use] extern crate bitflags;
+// #[macro_use] extern crate bitflags;
 extern crate peridot_vertex_processing_pack;
 
 use bedrock as br; use bedrock::traits::*;
