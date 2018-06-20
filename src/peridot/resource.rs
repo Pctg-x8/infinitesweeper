@@ -88,14 +88,21 @@ impl<'m> Drop for AutocloseMappedMemoryRange<'m> {
     }
 }
 
+/// A refcounted memory object.
+/// Convertable from `br::DeviceMemory` via `Into::into`
+pub type Memory = Rc<br::DeviceMemory>;
+/// A refcounted buffer object bound with a memory object.
 #[derive(Clone)]
-pub struct Buffer(Rc<br::Buffer>, Rc<br::DeviceMemory>, usize);
+pub struct Buffer(Rc<br::Buffer>, Memory, usize);
+/// A refcounted image object bound with a memory object.
 #[derive(Clone)]
-pub struct Image(Rc<br::Image>, Rc<br::DeviceMemory>);
+pub struct Image(Rc<br::Image>, Memory);
 impl Buffer {
-    pub fn bound(b: br::Buffer, mem: &Rc<br::DeviceMemory>, offset: usize) -> br::Result<Self> {
+    pub fn bound(b: br::Buffer, mem: &Memory, offset: usize) -> br::Result<Self> {
         b.bind(mem, offset).map(|_| Buffer(b.into(), mem.clone(), offset))
     }
+    /// Reference to a memory object bound with this object.
+    pub fn memory(&self) -> &Memory { &self.1 }
 
     pub fn map(&self, size: usize) -> br::Result<br::MappedMemoryRange> {
         self.1.map(self.2 .. self.2 + size)
@@ -106,9 +113,11 @@ impl Buffer {
     }
 }
 impl Image {
-    pub fn bound(r: br::Image, mem: &Rc<br::DeviceMemory>, offset: usize) -> br::Result<Self> {
+    pub fn bound(r: br::Image, mem: &Memory, offset: usize) -> br::Result<Self> {
         r.bind(mem, offset).map(|_| Image(r.into(), mem.clone()))
     }
+    /// Reference to a memory object bound with this object.
+    pub fn memory(&self) -> &Memory { &self.1 }
 }
 impl Deref for Buffer {
     type Target = br::Buffer; fn deref(&self) -> &br::Buffer { &self.0 }
