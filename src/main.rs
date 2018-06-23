@@ -15,6 +15,8 @@ use std::rc::Rc;
 
 fn main() { env_logger::init(); Game::launch(); }
 
+const CHUNK_SIZE: usize = 16;
+
 macro_rules! OffsetOf {
     ($t: ty => $m: ident) => {
         unsafe { std::mem::transmute::<_, usize>(&std::mem::transmute::<_, &$t>(0usize).$m) }
@@ -24,15 +26,21 @@ macro_rules! OffsetOf {
 #[repr(C)]
 pub struct ShaderSpecConstants {
     pub screen_aspect_wh: f32,
-    pub emboss_thickness: f32
+    pub emboss_thickness: f32,
+    pub chunk_index_mask: u32, pub chunk_vert_shifts: u32
 }
 impl ShaderSpecConstants {
     pub fn spec_info(&self) -> (Vec<br::vk::VkSpecializationMapEntry>, br::DynamicDataCell) {
         let entries = vec![
             br::vk::VkSpecializationMapEntry {
-                constantID: 0, size: std::mem::size_of::<f32>() as _,
-                offset: unsafe { std::mem::transmute::<_, usize>(&std::mem::transmute::<_, &Self>(0usize).screen_aspect_wh) as _ }
-            }
+                constantID: 0, size: std::mem::size_of::<f32>() as _, offset: OffsetOf!(Self => screen_aspect_wh) as _
+            },
+            br::vk::VkSpecializationMapEntry {
+                constantID: 1, size: std::mem::size_of::<u32>() as _, offset: OffsetOf!(Self => chunk_index_mask) as _
+            },
+            br::vk::VkSpecializationMapEntry {
+                constantID: 2, size: std::mem::size_of::<u32>() as _, offset: OffsetOf!(Self => chunk_vert_shifts) as _
+            },
         ];
         (entries, br::DynamicDataCell::from(self))
     }
@@ -102,7 +110,8 @@ impl EngineEvents for Game
         let u0_layout: Rc<_> = br::PipelineLayout::new(&e.graphics_device(), &[&res.dsl_u0], &[]).unwrap().into();
         let screen_spec = ShaderSpecConstants {
             screen_aspect_wh: filling_viewport.width / filling_viewport.height,
-            emboss_thickness: 0.05
+            emboss_thickness: 0.05,
+            chunk_index_mask: (CHUNK_SIZE - 1) as _, chunk_vert_shifts: CHUNK_SIZE.trailing_zeros()
         };
         let pass_gp = br::GraphicsPipelineBuilder::new(&u0_layout, (&rp, 0))
             .vertex_processing({
@@ -167,7 +176,7 @@ impl ResourceStack {
         }
     }
     pub fn draw_unit_rect(&self, buf: &br::Buffer, rec: &mut br::CmdRecord) {
-        rec.bind_vertex_buffers(0, &[(buf, self.unit_rect_vb)]).draw(4, 1, 0, 0);
+        rec.bind_vertex_buffers(0, &[(buf, self.unit_rect_vb)]).draw(4, (CHUNK_SIZE * CHUNK_SIZE) as _, 0, 0);
     }
 }
 struct MainResources {

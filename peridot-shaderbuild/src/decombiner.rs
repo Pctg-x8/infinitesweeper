@@ -52,9 +52,22 @@ impl<'s> Tokenizer<'s> {
         if !self.strip_prefix(":") { return None; }
         return self.glsl_represents_until_decl_end();
     }
+    pub fn glsl_type_ascription_until(&mut self, term_chars: &[char]) -> Option<&'s str> {
+        self.strip_ignores();
+        if !self.strip_prefix(":") { return None; }
+        return self.glsl_represents_until(term_chars);
+    }
     pub fn glsl_represents_until_decl_end(&mut self) -> Option<&'s str> {
         self.strip_ignores();
         let glsl_strip_bytes = self.0.chars().take_while(|&c| c != ';' && c != '@').fold(0, |a, c| a + c.len_utf8());
+        if glsl_strip_bytes == 0 { return None; }
+        let glsl_strip = &self.0[..glsl_strip_bytes];
+        self.0 = &self.0[glsl_strip_bytes..];
+        return Some(glsl_strip);
+    }
+    pub fn glsl_represents_until(&mut self, term_chars: &[char]) -> Option<&'s str> {
+        self.strip_ignores();
+        let glsl_strip_bytes = self.0.chars().take_while(|&c| term_chars.iter().all(|&cc| cc != c)).fold(0, |a, c| a + c.len_utf8());
         if glsl_strip_bytes == 0 { return None; }
         let glsl_strip = &self.0[..glsl_strip_bytes];
         self.0 = &self.0[glsl_strip_bytes..];
@@ -191,7 +204,7 @@ pub enum ToplevelBlock<'s> {
     VertexInput(Vec<(usize, BindingBlock<'s>)>),
     ShaderCode(br::ShaderStage, &'s str),
     Varying(br::ShaderStage, br::ShaderStage, Vec<Variable<'s>>),
-    SpecConstant(br::ShaderStage, usize, &'s str, &'s str),
+    SpecConstant(br::ShaderStage, usize, &'s str, &'s str, &'s str),
     Uniform(br::ShaderStage, usize, usize, &'s str, &'s str)
 }
 impl<'s> Tokenizer<'s> {
@@ -235,10 +248,11 @@ impl<'s> Tokenizer<'s> {
     pub fn spec_constant(&mut self) -> ToplevelBlock<'s> {
         let (stg, idx) = self.spec_constant_header_rest().expect("ShaderStage then ConstantID required");
         let id = self.strip_ignores().strip_ident().expect("Identifier required");
+        let ty = self.strip_ignores().glsl_type_ascription_until(&['=']).expect("Type required for SpecConstant");
         if !self.strip_ignores().strip_prefix("=") { panic!("Equal required"); }
         let init = self.glsl_represents_until_decl_end().expect("Initial value required");
         if !self.strip_ignores().declaration_end() { panic!("; required at the end of each declaration"); }
-        return ToplevelBlock::SpecConstant(stg, idx, id, init);
+        return ToplevelBlock::SpecConstant(stg, idx, id, ty, init);
     }
     pub fn uniform(&mut self) -> ToplevelBlock<'s> {
         let (stg, set, binding) = self.uniform_header_rest().expect("ShaderStage then pair of descriptor set and binding indices are required");
@@ -276,12 +290,14 @@ impl<'s> Tokenizer<'s> {
     }
 }
 
+pub type GlslType<'s> = &'s str;
+
 #[derive(Debug, Clone)]
 pub struct CombinedShader<'s> {
     vertex_input: Vec<(usize, BindingBlock<'s>)>,
     vertex_shader_code: &'s str, fragment_shader_code: Option<&'s str>,
     varyings_between_shaders: Vec<(br::ShaderStage, br::ShaderStage, Vec<Variable<'s>>)>,
-    spec_constants_per_stage: BTreeMap<br::ShaderStage, BTreeMap<usize, (&'s str, &'s str)>>,
+    spec_constants_per_stage: BTreeMap<br::ShaderStage, BTreeMap<usize, (&'s str, GlslType<'s>, &'s str)>>,
     uniforms_per_stage: BTreeMap<br::ShaderStage, BTreeMap<(usize, usize), (&'s str, &'s str)>>
 }
 impl<'s> CombinedShader<'s> {
@@ -307,10 +323,10 @@ impl<'s> CombinedShader<'s> {
                 },
                 ToplevelBlock::ShaderCode(ss, _) => panic!("Unsupported Shader Stage: {:08b}", ss.0),
                 ToplevelBlock::Varying(src, dst, vars) => cs.varyings_between_shaders.push((src, dst, vars)),
-                ToplevelBlock::SpecConstant(stg, idx, name, init) => {
+                ToplevelBlock::SpecConstant(stg, idx, name, ty, init) => {
                     let storage = cs.spec_constants_per_stage.entry(stg).or_insert_with(BTreeMap::new);
                     if storage.contains_key(&idx) { panic!("Multiple Definitions of SpecConstant for same id in same stage"); }
-                    storage.insert(idx, (name, init));
+                    storage.insert(idx, (name, ty, init));
                 },
                 ToplevelBlock::Uniform(stg, set, binding, name, init) => {
                     let storage = cs.uniforms_per_stage.entry(stg).or_insert_with(BTreeMap::new);
@@ -344,8 +360,8 @@ impl<'s> CombinedShader<'s> {
         }
         // 定数(uniformとspecconstant)
         if let Some(cons) = self.spec_constants_per_stage.get(&br::ShaderStage::VERTEX) {
-            for (id, &(name, init)) in cons.iter() {
-                code += &format!("layout(constant_id = {}) const float {} = {};\n", id, name, init);
+            for (id, &(name, ty, init)) in cons.iter() {
+                code += &format!("layout(constant_id = {}) const {} {} = {};\n", id, ty, name, init);
             }
         }
         if let Some(ufs) = self.uniforms_per_stage.get(&br::ShaderStage::VERTEX) {
@@ -381,8 +397,8 @@ impl<'s> CombinedShader<'s> {
         }
         // 定数(uniformとspecconstant)
         if let Some(cons) = self.spec_constants_per_stage.get(&br::ShaderStage::FRAGMENT) {
-            for (id, &(name, init)) in cons.iter() {
-                code += &format!("layout(constant_id = {}) const float {} = {};\n", id, name, init);
+            for (id, &(name, ty, init)) in cons.iter() {
+                code += &format!("layout(constant_id = {}) const {} {} = {};\n", id, ty, name, init);
             }
         }
         if let Some(ufs) = self.uniforms_per_stage.get(&br::ShaderStage::FRAGMENT) {

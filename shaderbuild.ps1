@@ -1,0 +1,1 @@
+peridot-shaderbuild/target/release/peridot-shaderbuild.exe $args
