@@ -29,12 +29,12 @@ impl PvpContainer {
         // バイナリを裏で構築しつつオフセット値を書き出す
         let mut blob = Cursor::new(Vec::new());
         self.vertex_bindings.binary_serialize(&mut blob)?;
-        VariableUInt(blob.seek(SeekFrom::Current(0))? as _).write(writer)?;
+        VariableUInt((blob.seek(SeekFrom::Current(0))?) as _).write(writer)?;
         self.vertex_attributes.binary_serialize(&mut blob)?;
-        VariableUInt(blob.seek(SeekFrom::Current(0))? as _).write(writer)?;
+        VariableUInt((blob.seek(SeekFrom::Current(0))?) as _).write(writer)?;
         self.vertex_shader.binary_serialize(&mut blob)?;
         if let Some(ref b) = self.fragment_shader {
-            VariableUInt(blob.seek(SeekFrom::Current(0))? as _).write(writer)?;
+            VariableUInt((blob.seek(SeekFrom::Current(0))?) as _).write(writer)?;
             b.binary_serialize(&mut blob)?;
         }
         else { VariableUInt(0).write(writer)?; }
@@ -59,11 +59,12 @@ impl<R: BufRead + Seek> PvpContainerReader<R> {
         let VariableUInt(vsh_offset) = VariableUInt::read(&mut reader)?;
         let VariableUInt(fsh_offset_0) = VariableUInt::read(&mut reader)?;
         let blob_offset = reader.seek(SeekFrom::Current(0))? as usize;
+        println!("Offsets: {:?} {:?} {:?} {:?}", blob_offset, va_offset, vsh_offset, fsh_offset_0);
 
         return Ok(PvpContainerReader {
-            vb_offset: blob_offset, va_offset: va_offset + blob_offset,
-            vsh_offset: vsh_offset + blob_offset,
-            fsh_offset: if fsh_offset_0 == 0 { None } else { Some(fsh_offset_0 + blob_offset) },
+            vb_offset: blob_offset as _, va_offset: (va_offset + blob_offset as u32) as _,
+            vsh_offset: (vsh_offset + blob_offset as u32) as _,
+            fsh_offset: if fsh_offset_0 == 0 { None } else { Some((fsh_offset_0 + blob_offset as u32) as _) },
             reader
         });
     }
@@ -144,39 +145,43 @@ impl BinarySerializeVkStructures for br::vk::VkVertexInputAttributeDescription {
 }
 impl<T: BinarySerializeVkStructures> BinarySerializeVkStructures for Vec<T> {
     fn binary_serialize<W: Write>(&self, sink: &mut W) -> IOResult<()> {
-        VariableUInt(self.len()).write(sink)?;
+        VariableUInt(self.len() as _).write(sink)?;
         for x in self { x.binary_serialize(sink)?; } return Ok(());
     }
     fn binary_unserialize<R: BufRead>(source: &mut R) -> IOResult<Self> where Self: Sized {
         let VariableUInt(element_count) = VariableUInt::read(source)?;
-        let mut vs = Vec::with_capacity(element_count);
+        let mut vs = Vec::with_capacity(element_count as _);
         for _ in 0 .. element_count { vs.push(T::binary_unserialize(source)?); }
         return Ok(vs);
     }
 }
 impl BinarySerializeVkStructures for Vec<u8> {
     fn binary_serialize<W: Write>(&self, sink: &mut W) -> IOResult<()> {
-        VariableUInt(self.len()).write(sink)?; sink.write(self).map(drop)
+        VariableUInt(self.len() as _).write(sink)?; sink.write(self).map(drop)
     }
     fn binary_unserialize<R: BufRead>(source: &mut R) -> IOResult<Self> where Self: Sized {
         let VariableUInt(element_count) = VariableUInt::read(source)?;
-        let mut buf = vec![0u8; element_count];
+        let mut buf = vec![0u8; element_count as usize];
         source.read_exact(&mut buf).map(|_| buf)
     }
 }
 
 /// octet variadic unsigned integer
-struct VariableUInt(usize);
+struct VariableUInt(u32);
 impl VariableUInt {
     fn write<W: Write>(&self, writer: &mut W) -> IOResult<()> {
-        let (mut n, mut buf) = (self.0 >> 8, vec![(self.0 & 0xff) as u8]);
-        while (*buf.last().unwrap() & 0x80) != 0 {
-            buf.push((n & 0xff) as _); n >>= 8;
-        }
+        let buf = Self::decompose_rec(self.0, Vec::new());
         writer.write(&buf).map(drop)
     }
+    // u32 to aparted octets
+    fn decompose_rec(n: u32, mut sink: Vec<u8>) -> Vec<u8> {
+        let n7 = (n & 0x7f) as u8;
+        let nr = n >> 7;
+        sink.push(n7 | if nr != 0 { 0x80 } else { 0 });
+        if nr != 0 { Self::decompose_rec(nr, sink) } else { sink }
+    }
     fn read<R: BufRead>(reader: &mut R) -> IOResult<Self> {
-        let (mut v, mut shifts) = (0usize, 0usize);
+        let (mut v, mut shifts) = (0u32, 0usize);
         loop {
             let (consumed, done) = {
                 let mut available = match reader.fill_buf() {
@@ -185,8 +190,8 @@ impl VariableUInt {
                 };
                 let (mut consumed, mut done) = (0, false);
                 while !available.is_empty() {
-                    v |= (available[0] as usize) << shifts;
-                    shifts += 8;
+                    v |= ((available[0] & 0x7f) as u32) << shifts;
+                    shifts += 7;
                     consumed += 1;
                     if (available[0] & 0x80) == 0 { done = true; break; }
                     available = &available[1..];
