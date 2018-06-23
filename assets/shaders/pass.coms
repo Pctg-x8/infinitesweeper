@@ -1,20 +1,25 @@
 // Combined Shader
 
 VertexInput {
-    Binding 0 [PerVertex] { pos: vec4; }
+    Binding 0 [PerVertex] { pos: vec2; uv: vec2; }
 }
 VertexShader {
-    RasterPosition = pos; col = vec4(1.0f, 1.0f, 1.0f, 1.0f);
+    RasterPosition = vec4((pos + offs) * scale * vec2(1.0, ScreenAspectWH), 0.0, 1.0);
+    uv_v = uv;
 }
 FragmentShader {
-    Target[0] = col;
+    float light = clamp(step(uv_v.x, EmbossThickness) + step(uv_v.y, EmbossThickness), 0.0, 1.0);
+    float dark_inv = clamp(step(uv_v.x, 1.0 - EmbossThickness) * step(uv_v.y, 1.0 - EmbossThickness), 0.0, 1.0);
+    float face_col = 0.875 * mix(1.0, 1.125, light) * mix(0.75, 1.0, dark_inv);
+    Target[0] = vec4(face_col, face_col, face_col, 1.0);
 }
 
 Varyings VertexShader -> FragmentShader {
-    col: vec4;
+    uv_v: vec2;
 }
 
-SpecConstant[VertexShader](0) ScreenAspectWH = 1.0f;
+SpecConstant[VertexShader](0) ScreenAspectWH = 1.0;
+SpecConstant[FragmentShader](0) EmbossThickness = 0.1;
 Uniform[VertexShader](0, 0) VertexPlacement {
     vec2 offs, scale;
 }

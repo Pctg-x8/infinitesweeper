@@ -262,6 +262,7 @@ impl SubpassDependencyTemplates
     }
 }
 
+use std::ffi::CString;
 use peridot_vertex_processing_pack::PvpContainer;
 pub struct PvpShaderModules {
     bindings: Vec<br::vk::VkVertexInputBindingDescription>, attributes: Vec<br::vk::VkVertexInputAttributeDescription>,
@@ -279,9 +280,13 @@ impl PvpShaderModules {
         })
     }
     pub fn generate_vps(&self, primitive_topo: br::vk::VkPrimitiveTopology) -> br::VertexProcessingStages {
-        let mut r = br::VertexProcessingStages::new(br::PipelineShader::new(&self.vertex, "main", None),
-            &self.bindings, &self.attributes, primitive_topo);
-        if let Some(ref f) = self.fragment { r.fragment_shader(br::PipelineShader::new(f, "main", None)); }
+        let mut r = br::VertexProcessingStages::new(br::PipelineShader
+        {
+            module: &self.vertex, entry_name: CString::new("main").unwrap(), specinfo: None
+        }, &self.bindings, &self.attributes, primitive_topo);
+        if let Some(ref f) = self.fragment {
+            r.fragment_shader(br::PipelineShader { module: f, entry_name: CString::new("main").unwrap(), specinfo: None });
+        }
         return r;
     }
 }
@@ -392,4 +397,22 @@ impl TransferBatch {
                 &[], &buf_barriers, &[]);
         }
     }
+}
+
+/// Batching mechanism for Updating Descriptor Sets
+pub struct DescriptorSetUpdateBatch(Vec<br::DescriptorSetWriteInfo>, Vec<br::DescriptorSetCopyInfo>);
+impl DescriptorSetUpdateBatch {
+    /// Create an Empty batch
+    pub fn new() -> Self { DescriptorSetUpdateBatch(Vec::new(), Vec::new()) }
+    /// Write an information to bound index and array index in destination.
+    pub fn write_index(&mut self, dest: br::vk::VkDescriptorSet, bound: u32, array: u32, info: br::DescriptorUpdateInfo) -> &mut Self {
+        self.0.push(br::DescriptorSetWriteInfo(dest, bound, array, info));
+        return self;
+    }
+    /// Write an information to bound index in destination.
+    pub fn write(&mut self, dest: br::vk::VkDescriptorSet, bound: u32, info: br::DescriptorUpdateInfo) -> &mut Self {
+        self.write_index(dest, bound, 0, info)
+    }
+    /// Submit entire batches
+    pub fn submit(&self, d: &br::Device) { d.update_descriptor_sets(&self.0, &self.1); }
 }

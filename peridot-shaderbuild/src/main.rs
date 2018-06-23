@@ -2,6 +2,8 @@ extern crate clap;
 extern crate bedrock;
 extern crate regex;
 extern crate peridot_vertex_processing_pack;
+extern crate env_logger;
+#[macro_use] extern crate log;
 
 mod decombiner; use decombiner::*;
 use peridot_vertex_processing_pack::*;
@@ -11,6 +13,8 @@ use std::path::{Path, PathBuf};
 use std::borrow::Cow;
 
 fn main() {
+    env_logger::init();
+
     let app = clap::App::new("peridot-shaderbuild")
         .version("0.1.0").author("S.Percentage <Syn.Tri.Naga@gmail.com>")
         .about("Combined Shader to Combined SPIR-V Builder for Peridot Engine via Google's shaderc")
@@ -36,13 +40,14 @@ fn process<I: AsRef<Path>, O: AsRef<Path>>(infile_path: I, outfile_path: O) {
         .unwrap();
     let mut tok = Tokenizer::new(&content);
     let comsh = CombinedShader::from_parsed_blocks(tok.toplevel_blocks());
-    let compile_vs = run_compiler_process("vertex", comsh.emit_vertex_shader().as_bytes())
+    let compile_vs = run_compiler_process("vertex", &comsh.emit_vertex_shader())
         .expect("Failed to spawn compiler process");
     let fragment_shader = if comsh.is_provided_fsh() {
-        let compile_fs = run_compiler_process("fragment", comsh.emit_fragment_shader().as_bytes())
+        let compile_fs = run_compiler_process("fragment", &comsh.emit_fragment_shader())
             .expect("Failed to spawn compiler process");
         let cfs_out = compile_fs.wait_with_output().expect("Failed to waiting compiler");
         if !cfs_out.status.success() { eprintln!("There are some errors while compiling fragment shader"); }
+        trace!("Vertex shader output:\n{}", std::str::from_utf8(&cfs_out.stdout).unwrap());
         // println!("cfs output: {:?}", cfs_out.stdout);
         parse_num_output(std::str::from_utf8(&cfs_out.stdout).unwrap()).into()
     }
@@ -51,6 +56,7 @@ fn process<I: AsRef<Path>, O: AsRef<Path>>(infile_path: I, outfile_path: O) {
     if !cvs_out.status.success() {
         eprintln!("There are some errors while compiling vertex shader.");
     }
+    trace!("Vertex shader output:\n{}", std::str::from_utf8(&cvs_out.stdout).unwrap());
     // let vsh_str = String::from_utf8(cvs_out.stdout).unwrap();
     // println!("cvs output: {:?}", vsh_str);
     let vertex_shader = parse_num_output(std::str::from_utf8(&cvs_out.stdout).unwrap());
@@ -65,10 +71,11 @@ fn process<I: AsRef<Path>, O: AsRef<Path>>(infile_path: I, outfile_path: O) {
     let mut fp_out = std::fs::File::create(outfile_path).expect("Failed to create output file");
     container.write(&mut fp_out).expect("Failed to write Peridot Vertex Processing file");
 }
-fn run_compiler_process(shader_stage: &str, stdin_bytes: &[u8]) -> std::io::Result<std::process::Child> {
+fn run_compiler_process(shader_stage: &str, stdin_bytes: &str) -> std::io::Result<std::process::Child> {
+    trace!("Compiling {}: Generated Code: \n{}", shader_stage, stdin_bytes);
     let mut compiler = Command::new("glslc").arg(&format!("-fshader-stage={}", shader_stage))
         .args(&["-o", "-", "-mfmt=num", "-"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit()).spawn()?;
-    compiler.stdin.as_mut().expect("Failed top open stdin of compiler process").write_all(stdin_bytes)?;
+    compiler.stdin.as_mut().expect("Failed top open stdin of compiler process").write_all(stdin_bytes.as_bytes())?;
     return Ok(compiler);
 }
 fn parse_num_output(cout: &str) -> Vec<u8> {

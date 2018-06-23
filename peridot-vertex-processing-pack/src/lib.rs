@@ -59,7 +59,6 @@ impl<R: BufRead + Seek> PvpContainerReader<R> {
         let VariableUInt(vsh_offset) = VariableUInt::read(&mut reader)?;
         let VariableUInt(fsh_offset_0) = VariableUInt::read(&mut reader)?;
         let blob_offset = reader.seek(SeekFrom::Current(0))? as usize;
-        println!("Offsets: {:?} {:?} {:?} {:?}", blob_offset, va_offset, vsh_offset, fsh_offset_0);
 
         return Ok(PvpContainerReader {
             vb_offset: blob_offset as _, va_offset: (va_offset + blob_offset as u32) as _,
