@@ -32,7 +32,7 @@ impl<'s> Tokenizer<'s> {
     }
     fn strip_ident(&mut self) -> Option<&'s str> {
         if self.0.starts_with(|c: char| c.is_digit(10)) { return None; }
-        let bytes = self.0.chars().take_while(|&c| c.is_alphanumeric()).fold(0, |a, c| a + c.len_utf8());
+        let bytes = self.0.chars().take_while(|&c| c.is_alphanumeric() || c == '_').fold(0, |a, c| a + c.len_utf8());
         if bytes == 0 { return None; }
         let slice = &self.0[..bytes]; self.0 = &self.0[bytes..];
         return Some(slice);
