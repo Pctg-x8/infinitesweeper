@@ -4,8 +4,7 @@ VertexInput {
     Binding 0 [PerVertex] { pos: vec2; uv: vec2; }
 }
 VertexShader {
-    vec2 p = vec2(gl_InstanceIndex & ChunkIndexMask, gl_InstanceIndex >> ChunkVertShifts);
-    RasterPosition = vec4((pos + offs + p) * scale * vec2(1.0, ScreenAspectWH), 0.0, 1.0);
+    RasterPosition = vec4((pos + offs + chunk_offs) * scale * vec2(1.0, ScreenAspectWH), 0.0, 1.0);
     uv_v = uv;
 }
 FragmentShader {
@@ -25,4 +24,5 @@ SpecConstant[VertexShader](1) ChunkIndexMask: uint = 0x0f;
 SpecConstant[VertexShader](2) ChunkVertShifts: uint = 4;
 Uniform[VertexShader](0, 0) VertexPlacement {
     vec2 offs, scale;
+    vec2 chunk_offs;
 }

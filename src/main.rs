@@ -27,28 +27,20 @@ macro_rules! OffsetOf {
 pub struct ShaderSpecConstants {
     pub screen_aspect_wh: f32,
     pub emboss_thickness: f32,
-    pub chunk_index_mask: u32, pub chunk_vert_shifts: u32
 }
 impl ShaderSpecConstants {
     pub fn spec_info(&self) -> (Vec<br::vk::VkSpecializationMapEntry>, br::DynamicDataCell) {
         let entries = vec![
             br::vk::VkSpecializationMapEntry {
                 constantID: 0, size: std::mem::size_of::<f32>() as _, offset: OffsetOf!(Self => screen_aspect_wh) as _
-            },
-            br::vk::VkSpecializationMapEntry {
-                constantID: 1, size: std::mem::size_of::<u32>() as _, offset: OffsetOf!(Self => chunk_index_mask) as _
-            },
-            br::vk::VkSpecializationMapEntry {
-                constantID: 2, size: std::mem::size_of::<u32>() as _, offset: OffsetOf!(Self => chunk_vert_shifts) as _
-            },
+            }
         ];
         (entries, br::DynamicDataCell::from(self))
     }
     pub fn spec_info_frag(&self) -> (Vec<br::vk::VkSpecializationMapEntry>, br::DynamicDataCell) {
         let entries = vec![
             br::vk::VkSpecializationMapEntry {
-                constantID: 0, size: std::mem::size_of::<f32>() as _,
-                offset: OffsetOf!(Self => emboss_thickness) as _
+                constantID: 0, size: std::mem::size_of::<f32>() as _, offset: OffsetOf!(Self => emboss_thickness) as _
             }
         ];
         (entries, br::DynamicDataCell::from(self))
@@ -110,12 +102,11 @@ impl EngineEvents for Game
         let u0_layout: Rc<_> = br::PipelineLayout::new(&e.graphics_device(), &[&res.dsl_u0], &[]).unwrap().into();
         let screen_spec = ShaderSpecConstants {
             screen_aspect_wh: filling_viewport.width / filling_viewport.height,
-            emboss_thickness: 0.05,
-            chunk_index_mask: (CHUNK_SIZE - 1) as _, chunk_vert_shifts: CHUNK_SIZE.trailing_zeros()
+            emboss_thickness: 0.05
         };
         let pass_gp = br::GraphicsPipelineBuilder::new(&u0_layout, (&rp, 0))
             .vertex_processing({
-                let mut vps = pass_shaders.generate_vps(br::vk::VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP);
+                let mut vps = pass_shaders.generate_vps(br::vk::VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
                 vps.mod_vertex_shader().specinfo = screen_spec.spec_info().into();
                 vps.mod_fragment_shader().unwrap().specinfo = screen_spec.spec_info_frag().into();
                 vps
@@ -133,7 +124,7 @@ impl EngineEvents for Game
             rec.begin_render_pass(&rp, fb, framebuffer_size.clone(), &[br::ClearValue::Color([0.0; 4])], true);
             pass_gp.bind(&mut rec);
             rec.bind_graphics_descriptor_sets(0, &[res.dsets[0]], &[]);
-            res.stack.draw_unit_rect(&res.buffer, &mut rec);
+            res.stack.draw_chunked_rects(&res.buffer, &mut rec);
             rec.end_render_pass();
         }
         
@@ -151,32 +142,49 @@ impl EngineEvents for Game
 }
 
 #[repr(C)] #[derive(Clone, PartialEq)]
-pub struct VertexPlacementUniformData { pub offs: [f32; 2], pub scale: [f32; 2] }
+pub struct VertexPlacementUniformData { pub offs: [f32; 2], pub scale: [f32; 2], pub chunk_offs: [f32; 2] }
 
 pub struct ResourceStack {
-    unit_rect_vb: usize,
+    chunked_rects_vb: usize, chunked_rects_ib: usize,
     vertex_placement_ub: usize
 }
 impl ResourceStack {
     pub fn init(bp: &mut BufferPrealloc) -> Self {
         ResourceStack {
-            unit_rect_vb: bp.add(BufferContent::vertex::<[[f32; 4]; 4]>()),
-            vertex_placement_ub: bp.add(BufferContent::uniform::<[VertexPlacementUniformData; 1]>())
+            chunked_rects_vb: bp.add(BufferContent::vertex::<[[f32; 4]; 4 * CHUNK_SIZE * CHUNK_SIZE]>()),
+            chunked_rects_ib: bp.add(BufferContent::index::<[u16; 6 * CHUNK_SIZE * CHUNK_SIZE]>()),
+            vertex_placement_ub: bp.add(BufferContent::uniform::<[VertexPlacementUniformData; 6]>())
         }
     }
     pub fn init_data(&self, mem: &br::MappedMemoryRange) {
         unsafe {
-            mem.get_mut::<[[f32; 4]; 4]>(self.unit_rect_vb).clone_from_slice(&[
-                [-0.5, -0.5, 0.0, 0.0], [-0.5, 0.5, 0.0, 1.0],
-                [ 0.5, -0.5, 1.0, 0.0], [ 0.5, 0.5, 1.0, 1.0]
-            ]);
-            mem.get_mut::<[VertexPlacementUniformData; 1]>(self.vertex_placement_ub).clone_from_slice(&[
-                VertexPlacementUniformData { offs: [0.0, 0.0], scale: [0.125, 0.125] }
+            Self::init_chunk_rects(mem.get_mut(self.chunked_rects_vb), mem.get_mut(self.chunked_rects_ib));
+            mem.get_mut::<[VertexPlacementUniformData; 6]>(self.vertex_placement_ub).clone_from_slice(&[
+                VertexPlacementUniformData { offs: [0.0, 0.0], scale: [0.125, 0.125], chunk_offs: [  0.0,   0.0] },
+                VertexPlacementUniformData { offs: [0.0, 0.0], scale: [0.125, 0.125], chunk_offs: [-16.0,   0.0] },
+                VertexPlacementUniformData { offs: [0.0, 0.0], scale: [0.125, 0.125], chunk_offs: [  0.0, -16.0] },
+                VertexPlacementUniformData { offs: [0.0, 0.0], scale: [0.125, 0.125], chunk_offs: [-16.0, -16.0] },
+                VertexPlacementUniformData { offs: [0.0, 0.0], scale: [0.125, 0.125], chunk_offs: [  0.0,  16.0] },
+                VertexPlacementUniformData { offs: [0.0, 0.0], scale: [0.125, 0.125], chunk_offs: [-16.0, -16.0] }
             ]);
         }
     }
-    pub fn draw_unit_rect(&self, buf: &br::Buffer, rec: &mut br::CmdRecord) {
-        rec.bind_vertex_buffers(0, &[(buf, self.unit_rect_vb)]).draw(4, (CHUNK_SIZE * CHUNK_SIZE) as _, 0, 0);
+    fn init_chunk_rects(vertices: &mut [[f32; 4]; 4 * CHUNK_SIZE * CHUNK_SIZE], indices: &mut [u16; 6 * CHUNK_SIZE * CHUNK_SIZE]) {
+        for (x, y) in (0 .. CHUNK_SIZE).flat_map(|y| (0 .. CHUNK_SIZE).map(move |x| (x, y))) {
+            let flat = x + y * CHUNK_SIZE;
+            vertices[flat * 4 + 0] = [x as f32 - 0.5, y as f32 - 0.5, 0.0, 0.0];
+            vertices[flat * 4 + 1] = [x as f32 - 0.5, y as f32 + 0.5, 0.0, 1.0];
+            vertices[flat * 4 + 2] = [x as f32 + 0.5, y as f32 - 0.5, 1.0, 0.0];
+            vertices[flat * 4 + 3] = [x as f32 + 0.5, y as f32 + 0.5, 1.0, 1.0];
+            indices[flat * 6 + 0 .. flat * 6 + 6].copy_from_slice(&[
+                flat as u16 * 4 + 0, flat as u16 * 4 + 1, flat as u16 * 4 + 2,
+                flat as u16 * 4 + 2, flat as u16 * 4 + 1, flat as u16 * 4 + 3
+            ]);
+        }
+    }
+    pub fn draw_chunked_rects(&self, buf: &br::Buffer, rec: &mut br::CmdRecord) {
+        rec.bind_vertex_buffers(0, &[(buf, self.chunked_rects_vb)]).bind_index_buffer(&buf, self.chunked_rects_ib, br::IndexType::U16)
+            .draw_indexed((6 * CHUNK_SIZE * CHUNK_SIZE) as _, 1, 0, 0, 0);
     }
 }
 struct MainResources {
@@ -201,7 +209,8 @@ impl MainResources {
         let dsets = dpool.alloc(&[&dsl_u0])?;
         
         transfer_batch.add_mirroring_buffer(&buffer_upload, &buffer, 0, bp.total_size() as _);
-        dsu_batch.write(dsets[0], 0, br::DescriptorUpdateInfo::UniformBuffer(vec![(buffer.native_ptr(), rs.vertex_placement_ub .. bp.total_size())]));
+        dsu_batch.write(dsets[0], 0,
+            br::DescriptorUpdateInfo::UniformBuffer(vec![(buffer.native_ptr(), rs.vertex_placement_ub .. bp.total_size())]));
         return Ok(MainResources { stack: rs, buffer, dsl_u0, dpool, dsets });
     }
 }
