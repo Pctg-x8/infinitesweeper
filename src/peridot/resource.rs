@@ -1,4 +1,4 @@
-use bedrock as br; use br::traits::*;
+use bedrock as br; use self::br::traits::*;
 use super::*;
 use std::ops::Deref;
 use std::mem::size_of;

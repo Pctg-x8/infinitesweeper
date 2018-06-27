@@ -20,8 +20,6 @@ Varyings VertexShader -> FragmentShader {
 
 SpecConstant[VertexShader](0) ScreenAspectWH: float = 1.0;
 SpecConstant[FragmentShader](0) EmbossThickness: float = 0.1;
-SpecConstant[VertexShader](1) ChunkIndexMask: uint = 0x0f;
-SpecConstant[VertexShader](2) ChunkVertShifts: uint = 4;
 Uniform[VertexShader](0, 0) VertexPlacement {
     vec2 offs, scale;
     vec2 chunk_offs;

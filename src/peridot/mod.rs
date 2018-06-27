@@ -5,8 +5,10 @@ use appframe::*;
 use std::rc::Rc;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::ptr::null_mut;
+use std::cell::UnsafeCell;
 
-mod window; use self::window::{MainWindow, SurfaceInfo, WindowRenderTargets};
+mod window; use self::window::{MainWindow, RenderWindowInterface};
 mod resource; pub use self::resource::*;
 #[cfg(debug_assertions)] mod debug; #[cfg(debug_assertions)] use self::debug::DebugReport;
 
@@ -23,7 +25,7 @@ impl EngineEvents for () {}
 pub struct Engine<E: EngineEvents + 'static>
 {
     appname: &'static str, appversion: (u32, u32, u32),
-    pub(self) g: LateInit<Graphics>, w: LateInit<Rc<MainWindow<E>>>, wrt: Discardable<WindowRenderTargets>,
+    pub(self) g: LateInit<Graphics>, w: UnsafeCell<Option<Rc<RenderWindowInterface>>>,
     event_handler: E
 }
 type PlatformServer<E> = GUIApplication<Engine<E>>;
@@ -33,15 +35,14 @@ impl<E: EngineEvents + 'static> Engine<E>
     {
         GUIApplication::run(Engine
         {
-            appname, appversion: version, event_handler,
-            g: LateInit::new(), w: LateInit::new(), wrt: Discardable::new()
+            appname, appversion: version, event_handler, g: LateInit::new(), w: UnsafeCell::new(None)
         });
     }
     pub fn graphics(&self) -> Ref<Graphics> { self.g.get() }
     pub fn graphics_device(&self) -> Ref<br::Device> { Ref::map(self.g.get(), |g| &g.device) }
     pub fn graphics_queue_family_index(&self) -> u32 { self.graphics().graphics_queue.family }
-    pub fn backbuffer_format(&self) -> br::vk::VkFormat { self.w.get().backbuffer_format() }
-    pub fn backbuffers(&self) -> Ref<[br::ImageView]> { Ref::map(self.wrt.get(), |wrt| wrt.backbuffers()) }
+    pub fn backbuffer_format(&self) -> br::vk::VkFormat { unsafe { Option::as_ref(&*self.w.get()).unwrap().backbuffer_format() } }
+    pub fn backbuffers(&self) -> &[br::ImageView] { unsafe { Option::as_ref(&*self.w.get()).unwrap().backbuffers() } }
     
     pub fn submit_commands<Gen: FnOnce(&mut br::CmdRecord)>(&self, generator: Gen) -> br::Result<()>
     {
@@ -52,18 +53,13 @@ impl<E: EngineEvents + 'static> Engine<E>
         self.graphics().graphics_queue.q.submit(batches, Some(fence))
     }
 
-    pub(self) fn create_wrt(&self, si: &SurfaceInfo, v: &NativeView<MainWindow<E>>) -> br::Result<()>
-    {
-        let wrt = WindowRenderTargets::new(&self.g.get(), si, v)?;
-        self.wrt.set(wrt); return Ok(());
-    }
     pub(self) fn do_update(&self)
     {
-        let g = self.graphics(); let mut wrt = self.wrt.get_mut();
-        let bb_index = wrt.acquire_next_backbuffer_index(None, br::CompletionHandler::Device(&g.acquiring_backbuffer))
+        let g = self.graphics(); let w = unsafe { (*self.w.get()).as_ref().unwrap() };
+        let bb_index = w.acquire_next_backbuffer_index(None, br::CompletionHandler::Device(&g.acquiring_backbuffer))
             .expect("Acquiring available backbuffer index");
         {
-            let bbf = wrt.command_completion_for_backbuffer_mut(bb_index as _);
+            let mut bbf = w.command_completion_for_backbuffer_mut(bb_index as _);
             bbf.wait().expect("Waiting Previous command completion");
             let mut fb_submission = self.event_handler.update(self, bb_index);
             fb_submission.signal_semaphores.to_mut().push(&g.present_ordering);
@@ -71,7 +67,7 @@ impl<E: EngineEvents + 'static> Engine<E>
             self.submit_buffered_commands(&[fb_submission], bbf.object()).expect("CommandBuffer Submission");
             unsafe { bbf.signal(); }
         }
-        wrt.present_on(&g.graphics_queue.q, bb_index, &[&g.present_ordering]).expect("Present Submission");
+        w.present_on(&g.graphics_queue.q, bb_index, &[&g.present_ordering]).expect("Present Submission");
     }
 }
 impl<E: EngineEvents> EventDelegate for Engine<E>
@@ -82,11 +78,15 @@ impl<E: EngineEvents> EventDelegate for Engine<E>
         let w = MainWindow::new(&format!("{} v{}.{}.{}", self.appname, self.appversion.0, self.appversion.1, self.appversion.2),
             512 * 10 / 16, 512, app);
         w.show();
-        self.w.init(w);
+        unsafe { *self.w.get() =  Some(w as _); }
         self.event_handler.init(self);
     }
 }
-impl<E: EngineEvents> Drop for Engine<E> { fn drop(&mut self) { self.graphics().device.wait().unwrap(); } }
+impl<E: EngineEvents> Drop for Engine<E> {
+    fn drop(&mut self) {
+        self.graphics().device.wait().unwrap();
+    }
+}
 
 use std::cell::{Ref, RefMut, RefCell};
 pub struct LateInit<T>(RefCell<Option<T>>);
@@ -301,7 +301,7 @@ impl LayoutedPipeline {
     pub fn bind(&self, rec: &mut br::CmdRecord) { rec.bind_graphics_pipeline_pair(&self.0, &self.1); }
 }
 
-use br::vk::VkBufferCopy;
+use self::br::vk::VkBufferCopy;
 use std::cmp::{PartialEq, Eq, PartialOrd, Ord, Ordering};
 use std::hash::{Hash, Hasher};
 use std::collections::HashMap;

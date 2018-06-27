@@ -4,40 +4,67 @@ use bedrock as br;
 use std::rc::{Rc, Weak};
 
 use std::mem::{uninitialized, replace, forget};
+use std::cell::{UnsafeCell, RefMut, RefCell};
+use std::ptr::null_mut;
 
-pub struct MainWindow<E: EngineEvents + 'static>
-{
-    srv: Weak<PlatformServer<E>>, w: LateInit<NativeWindow<MainWindow<E>>>,
-    pub(super) surface: LateInit<SurfaceInfo>
+pub trait RenderWindowInterface {
+    fn backbuffer_format(&self) -> br::vk::VkFormat;
+    fn backbuffers(&self) -> &[br::ImageView];
+    fn acquire_next_backbuffer_index(&self, timeout: Option<u64>, completion_handler: br::CompletionHandler) -> br::Result<u32>;
+    fn present_on(&self, q: &br::Queue, index: u32, occurence_after: &[&br::Semaphore]) -> br::Result<()>;
+    fn command_completion_for_backbuffer_mut(&self, index: usize) -> RefMut<StateFence>;
 }
-impl<E: EngineEvents + 'static> MainWindow<E>
-{
-    pub fn new(caption: &str, width: u16, height: u16, app: &Rc<PlatformServer<E>>) -> Rc<Self>
-    {
-        let this = Rc::new(MainWindow
-        {
-            srv: Rc::downgrade(app), w: LateInit::new(), surface: LateInit::new()
+
+pub struct MainWindow<E: EngineEvents + 'static> {
+    srv: Weak<PlatformServer<E>>, w: LateInit<NativeWindow<MainWindow<E>>>,
+    surface_ptr: UnsafeCell<Option<SurfaceInfo>>, wrt_ptr: UnsafeCell<Option<WindowRenderTargets>>
+}
+impl<E: EngineEvents + 'static> MainWindow<E> {
+    pub fn new(caption: &str, width: u16, height: u16, app: &Rc<PlatformServer<E>>) -> Rc<Self> {
+        let this = Rc::new(MainWindow {
+            srv: Rc::downgrade(app), w: LateInit::new(), surface_ptr: UnsafeCell::new(None),
+            wrt_ptr: UnsafeCell::new(None)
         });
-        this.w.init(NativeWindowBuilder::new(width, height, caption)
-            .resizable(false).create_renderable(app, &this).unwrap());
+        this.w.init(NativeWindowBuilder::new(width, height, caption).resizable(false)
+            .create_renderable(app, &this).unwrap());
         return this;
     }
     pub fn show(&self) { self.w.get().show(); }
 
-    pub fn backbuffer_format(&self) -> br::vk::VkFormat { self.surface.get().fmt.format }
+    fn wrt_ref(&self) -> &WindowRenderTargets { unsafe { (*self.wrt_ptr.get()).as_ref().unwrap() } }
 }
-impl<E: EngineEvents> WindowEventDelegate for MainWindow<E>
-{
+impl<E: EngineEvents + 'static> WindowEventDelegate for MainWindow<E> {
     type ClientDelegate = Engine<E>;
-
-    fn init_view(&self, view: &NativeView<Self>)
-    {
+    fn init_view(&self, view: &NativeView<Self>) {
         let srv = self.srv.upgrade().unwrap();
         let surface = SurfaceInfo::new(&srv, view).unwrap();
-        srv.event_delegate().create_wrt(&surface, view).unwrap();
-        self.surface.init(surface);
+        let wrt = WindowRenderTargets::new(&srv.event_delegate().graphics(), &surface, view).unwrap();
+        unsafe {
+            *self.wrt_ptr.get() = Some(wrt);
+            *self.surface_ptr.get() = Some(surface);
+        }
     }
-    fn render(&self) { self.srv.upgrade().unwrap().event_delegate().do_update(); }
+    fn render(&self) { if let Some(srv) = self.srv.upgrade() { srv.event_delegate().do_update(); } }
+}
+/*impl<E: EngineEvents + 'static> Drop for MainWindow<E> {
+    fn drop(&mut self) {
+        // drop raw pointers
+        if !self.wrt_ptr.is_null() { unsafe { drop(Box::from_raw(self.wrt_ptr)); } self.wrt_ptr = null_mut(); }
+        if !self.surface_ptr.is_null() { unsafe { drop(Box::from_raw(self.surface_ptr)); } self.surface_ptr = null_mut(); }
+    }
+}*/
+impl<E: EngineEvents + 'static> RenderWindowInterface for MainWindow<E> {
+    fn backbuffer_format(&self) -> br::vk::VkFormat { unsafe { (*self.surface_ptr.get()).as_ref().unwrap().fmt.format } }
+    fn backbuffers(&self) -> &[br::ImageView] { &self.wrt_ref().bb }
+    fn acquire_next_backbuffer_index(&self, timeout: Option<u64>, completion_handler: br::CompletionHandler) -> br::Result<u32> {
+        self.wrt_ref().acquire_next_backbuffer_index(timeout, completion_handler)
+    }
+    fn present_on(&self, q: &br::Queue, index: u32, occurence_after: &[&br::Semaphore]) -> br::Result<()> {
+        self.wrt_ref().present_on(q, index, occurence_after)
+    }
+    fn command_completion_for_backbuffer_mut(&self, index: usize) -> RefMut<StateFence> {
+        self.wrt_ref().command_completion_for_backbuffer_mut(index)
+    }
 }
 
 pub(super) struct SurfaceInfo { obj: br::Surface, fmt: br::vk::VkSurfaceFormatKHR, pres_mode: br::PresentMode }
@@ -64,7 +91,7 @@ impl SurfaceInfo
 
 pub(super) struct WindowRenderTargets
 {
-    chain: br::Swapchain, bb: Vec<br::ImageView>, command_completions_for_backbuffer: Vec<StateFence>
+    chain: br::Swapchain, bb: Vec<br::ImageView>, command_completions_for_backbuffer: Vec<RefCell<StateFence>>
 }
 impl WindowRenderTargets
 {
@@ -85,7 +112,7 @@ impl WindowRenderTargets
         let (mut bb, mut command_completions_for_backbuffer) = (Vec::with_capacity(images.len()), Vec::with_capacity(images.len()));
         for x in images {
             bb.push(x.create_view(None, None, &Default::default(), &isr_c0)?);
-            command_completions_for_backbuffer.push(StateFence::new(&g.device)?);
+            command_completions_for_backbuffer.push(StateFence::new(&g.device)?.into());
         }
 
         return Ok(WindowRenderTargets { command_completions_for_backbuffer, bb, chain });
@@ -93,23 +120,21 @@ impl WindowRenderTargets
 
     pub fn backbuffers(&self) -> &[br::ImageView] { &self.bb }
     pub fn acquire_next_backbuffer_index(&self, timeout: Option<u64>, completion_handler: br::CompletionHandler)
-        -> br::Result<u32>
-    {
+            -> br::Result<u32> {
         self.chain.acquire_next(timeout, completion_handler)
     }
-    pub fn present_on(&self, q: &br::Queue, index: u32, occurence_after: &[&br::Semaphore]) -> br::Result<()>
-    {
+    pub fn present_on(&self, q: &br::Queue, index: u32, occurence_after: &[&br::Semaphore]) -> br::Result<()> {
         self.chain.queue_present(q, index, occurence_after)
     }
-    pub fn command_completion_for_backbuffer_mut(&mut self, index: usize) -> &mut StateFence {
-        &mut self.command_completions_for_backbuffer[index]
+    pub fn command_completion_for_backbuffer_mut(&self, index: usize) -> RefMut<StateFence> {
+        self.command_completions_for_backbuffer[index].borrow_mut()
     }
 }
 impl Drop for WindowRenderTargets
 {
     fn drop(&mut self)
     {
-        for f in self.command_completions_for_backbuffer.iter_mut() { f.wait().unwrap(); }
+        for f in self.command_completions_for_backbuffer.iter() { f.borrow_mut().wait().unwrap(); }
     }
 }
 
