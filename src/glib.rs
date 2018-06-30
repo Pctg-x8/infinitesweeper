@@ -198,7 +198,7 @@ impl ResourceStack {
     }
 }
 struct MainResources {
-    stack: ResourceStack, buffer: Buffer, dsl_u0: br::DescriptorSetLayout, dpool: br::DescriptorPool, dsets: Vec<br::vk::VkDescriptorSet>
+    stack: ResourceStack, buffer: Buffer, dsl_u0: br::DescriptorSetLayout, _dpool: br::DescriptorPool, dsets: Vec<br::vk::VkDescriptorSet>
 }
 impl MainResources {
     fn init(e: &Engine<Game>, transfer_batch: &mut TransferBatch, dsu_batch: &mut DescriptorSetUpdateBatch) -> br::Result<Self> {
@@ -221,6 +221,6 @@ impl MainResources {
         transfer_batch.add_mirroring_buffer(&buffer_upload, &buffer, 0, bp.total_size() as _);
         dsu_batch.write(dsets[0], 0,
             br::DescriptorUpdateInfo::UniformBuffer(vec![(buffer.native_ptr(), rs.vertex_placement_ub .. bp.total_size())]));
-        return Ok(MainResources { stack: rs, buffer, dsl_u0, dpool, dsets });
+        return Ok(MainResources { stack: rs, buffer, dsl_u0, _dpool: dpool, dsets });
     }
 }

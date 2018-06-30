@@ -5,72 +5,62 @@ use appframe::*;
 use std::rc::Rc;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
-use std::ptr::null_mut;
-use std::cell::UnsafeCell;
 
-mod window; use self::window::{MainWindow, RenderWindowInterface};
+mod window; use self::window::WindowRenderTargets;
 mod resource; pub use self::resource::*;
 #[cfg(debug_assertions)] mod debug; #[cfg(debug_assertions)] use self::debug::DebugReport;
 
-pub trait EngineEvents : Sized
-{
+pub trait EngineEvents : Sized {
     fn init(&self, _e: &Engine<Self>) {}
     fn update(&self, _e: &Engine<Self>, _on_backbuffer_of: u32) -> br::SubmissionBatch { br::SubmissionBatch::default() }
 }
 impl EngineEvents for () {}
-/*impl<F: Fn(&Engine<F>, u32) -> br::SubmissionBatch> EngineEvents for F
-{
-    fn update(&self, e: &Engine<Self>, on_backbuffer_of: u32) -> br::SubmissionBatch { self(e, on_backbuffer_of) }
-}*/
-pub struct Engine<E: EngineEvents + 'static>
-{
-    appname: &'static str, appversion: (u32, u32, u32),
-    pub(self) g: LateInit<Graphics>, w: UnsafeCell<Option<Rc<RenderWindowInterface>>>,
-    event_handler: E
+
+pub struct Engine<E: EngineEvents> {
+    surface: window::SurfaceInfo, wrt: WindowRenderTargets,
+    pub(self) g: Graphics, event_handler: E
 }
-type PlatformServer<E> = GUIApplication<Engine<E>>;
-impl<E: EngineEvents + 'static> Engine<E>
-{
-    pub fn launch(appname: &'static str, version: (u32, u32, u32), event_handler: E)
-    {
-        GUIApplication::run(Engine
-        {
-            appname, appversion: version, event_handler, g: LateInit::new(), w: UnsafeCell::new(None)
-        });
-    }
-    pub fn graphics(&self) -> Ref<Graphics> { self.g.get() }
-    pub fn graphics_device(&self) -> Ref<br::Device> { Ref::map(self.g.get(), |g| &g.device) }
-    pub fn graphics_queue_family_index(&self) -> u32 { self.graphics().graphics_queue.family }
-    pub fn backbuffer_format(&self) -> br::vk::VkFormat { unsafe { Option::as_ref(&*self.w.get()).unwrap().backbuffer_format() } }
-    pub fn backbuffers(&self) -> &[br::ImageView] { unsafe { Option::as_ref(&*self.w.get()).unwrap().backbuffers() } }
-    
-    pub fn submit_commands<Gen: FnOnce(&mut br::CmdRecord)>(&self, generator: Gen) -> br::Result<()>
-    {
-        self.g.get().submit_commands(generator)
-    }
-    pub fn submit_buffered_commands(&self, batches: &[br::SubmissionBatch], fence: &br::Fence) -> br::Result<()>
-    {
-        self.graphics().graphics_queue.q.submit(batches, Some(fence))
+impl<E: EngineEvents> Engine<E> {
+    pub fn launch_with_window<WE: WindowEventDelegate>(name: &str, version: (u32, u32, u32),
+            server: &GUIApplication<WE::ClientDelegate>, view: &NativeView<WE>, event_handler: E) -> br::Result<Self> {
+        let g = Graphics::new(name, version)?;
+        let surface = window::SurfaceInfo::new(server, &g, view)?;
+        let wrt = WindowRenderTargets::new(&g, &surface, view)?;
+        return Ok(Engine { g, surface, wrt, event_handler });
     }
 
-    pub(self) fn do_update(&self)
+    pub fn graphics(&self) -> &Graphics { &self.g }
+    pub fn graphics_device(&self) -> &br::Device { &self.g.device }
+    pub fn graphics_queue_family_index(&self) -> u32 { self.g.graphics_queue.family }
+    pub fn backbuffer_format(&self) -> br::vk::VkFormat { self.surface.format() }
+    pub fn backbuffers(&self) -> &[br::ImageView] { self.wrt.backbuffers() }
+    
+    pub fn submit_commands<Gen: FnOnce(&mut br::CmdRecord)>(&self, generator: Gen) -> br::Result<()> {
+        self.g.submit_commands(generator)
+    }
+    pub fn submit_buffered_commands(&self, batches: &[br::SubmissionBatch], fence: &br::Fence) -> br::Result<()> {
+        self.g.graphics_queue.q.submit(batches, Some(fence))
+    }
+
+    pub fn event_handler_ref(&self) -> &E { &self.event_handler }
+    pub fn do_update(&mut self)
     {
-        let g = self.graphics(); let w = unsafe { (*self.w.get()).as_ref().unwrap() };
-        let bb_index = w.acquire_next_backbuffer_index(None, br::CompletionHandler::Device(&g.acquiring_backbuffer))
+        let bb_index = self.wrt.acquire_next_backbuffer_index(None, br::CompletionHandler::Device(&self.g.acquiring_backbuffer))
             .expect("Acquiring available backbuffer index");
-        {
-            let mut bbf = w.command_completion_for_backbuffer_mut(bb_index as _);
-            bbf.wait().expect("Waiting Previous command completion");
-            let mut fb_submission = self.event_handler.update(self, bb_index);
-            fb_submission.signal_semaphores.to_mut().push(&g.present_ordering);
-            fb_submission.wait_semaphores.to_mut().push((&g.acquiring_backbuffer, br::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT));
-            self.submit_buffered_commands(&[fb_submission], bbf.object()).expect("CommandBuffer Submission");
-            unsafe { bbf.signal(); }
+        self.wrt.command_completion_for_backbuffer_mut(bb_index as _)
+            .wait().expect("Waiting Previous command completion");
+        let mut fb_submission = self.event_handler.update(self, bb_index);
+        fb_submission.signal_semaphores.to_mut().push(&self.g.present_ordering);
+        fb_submission.wait_semaphores.to_mut().push((&self.g.acquiring_backbuffer, br::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT));
+        self.submit_buffered_commands(&[fb_submission], self.wrt.command_completion_for_backbuffer(bb_index as _).object())
+            .expect("CommandBuffer Submission");
+        unsafe {
+            self.wrt.command_completion_for_backbuffer_mut(bb_index as _).signal();
         }
-        w.present_on(&g.graphics_queue.q, bb_index, &[&g.present_ordering]).expect("Present Submission");
+        self.wrt.present_on(&self.g.graphics_queue.q, bb_index, &[&self.g.present_ordering]).expect("Present Submission");
     }
 }
-impl<E: EngineEvents> EventDelegate for Engine<E>
+/*impl<E: EngineEvents> EventDelegate for Engine<E>
 {
     fn postinit(&self, app: &Rc<PlatformServer<E>>)
     {
@@ -81,7 +71,7 @@ impl<E: EngineEvents> EventDelegate for Engine<E>
         unsafe { *self.w.get() =  Some(w as _); }
         self.event_handler.init(self);
     }
-}
+}*/
 impl<E: EngineEvents> Drop for Engine<E> {
     fn drop(&mut self) {
         self.graphics().device.wait().unwrap();
