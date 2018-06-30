@@ -11,22 +11,25 @@ mod resource; pub use self::resource::*;
 #[cfg(debug_assertions)] mod debug; #[cfg(debug_assertions)] use self::debug::DebugReport;
 
 pub trait EngineEvents : Sized {
-    fn init(&self, _e: &Engine<Self>) {}
+    fn init(_e: &Engine<Self>) -> Self;
     fn update(&self, _e: &Engine<Self>, _on_backbuffer_of: u32) -> br::SubmissionBatch { br::SubmissionBatch::default() }
 }
-impl EngineEvents for () {}
+impl EngineEvents for () { fn init(_e: &Engine<Self>) -> Self { () } }
 
 pub struct Engine<E: EngineEvents> {
     surface: window::SurfaceInfo, wrt: WindowRenderTargets,
-    pub(self) g: Graphics, event_handler: E
+    pub(self) g: Graphics, event_handler: Option<E>
 }
 impl<E: EngineEvents> Engine<E> {
     pub fn launch_with_window<WE: WindowEventDelegate>(name: &str, version: (u32, u32, u32),
-            server: &GUIApplication<WE::ClientDelegate>, view: &NativeView<WE>, event_handler: E) -> br::Result<Self> {
+            server: &GUIApplication<WE::ClientDelegate>, view: &NativeView<WE>) -> br::Result<Self> {
         let g = Graphics::new(name, version)?;
         let surface = window::SurfaceInfo::new(server, &g, view)?;
         let wrt = WindowRenderTargets::new(&g, &surface, view)?;
-        return Ok(Engine { g, surface, wrt, event_handler });
+        let mut this = Engine { g, surface, wrt, event_handler: None };
+        let eh = E::init(&this);
+        this.event_handler = Some(eh);
+        return Ok(this);
     }
 
     pub fn graphics(&self) -> &Graphics { &self.g }
@@ -42,18 +45,20 @@ impl<E: EngineEvents> Engine<E> {
         self.g.graphics_queue.q.submit(batches, Some(fence))
     }
 
-    pub fn event_handler_ref(&self) -> &E { &self.event_handler }
+    pub fn event_handler_ref(&self) -> &E { self.event_handler.as_ref().expect("<EMPTY EVENTHANDLER>") }
     pub fn do_update(&mut self)
     {
         let bb_index = self.wrt.acquire_next_backbuffer_index(None, br::CompletionHandler::Device(&self.g.acquiring_backbuffer))
             .expect("Acquiring available backbuffer index");
         self.wrt.command_completion_for_backbuffer_mut(bb_index as _)
             .wait().expect("Waiting Previous command completion");
-        let mut fb_submission = self.event_handler.update(self, bb_index);
-        fb_submission.signal_semaphores.to_mut().push(&self.g.present_ordering);
-        fb_submission.wait_semaphores.to_mut().push((&self.g.acquiring_backbuffer, br::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT));
-        self.submit_buffered_commands(&[fb_submission], self.wrt.command_completion_for_backbuffer(bb_index as _).object())
-            .expect("CommandBuffer Submission");
+        {
+            let mut fb_submission = self.event_handler_ref().update(self, bb_index);
+            fb_submission.signal_semaphores.to_mut().push(&self.g.present_ordering);
+            fb_submission.wait_semaphores.to_mut().push((&self.g.acquiring_backbuffer, br::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT));
+            self.submit_buffered_commands(&[fb_submission], self.wrt.command_completion_for_backbuffer(bb_index as _).object())
+                .expect("CommandBuffer Submission");
+        }
         unsafe {
             self.wrt.command_completion_for_backbuffer_mut(bb_index as _).signal();
         }

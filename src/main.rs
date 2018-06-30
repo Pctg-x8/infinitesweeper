@@ -13,7 +13,7 @@ mod peridot;
 use appframe::*;
 use std::rc::{Rc, Weak};
 use std::cell::{UnsafeCell, RefCell, Ref, RefMut};
-use peridot::{Engine, EngineEvents};
+use peridot::Engine;
 use std::io::Result as IOResult;
 
 mod glib;
@@ -49,10 +49,8 @@ impl WindowEventDelegate for MainWindow {
     type ClientDelegate = App;
 
     fn init_view(&self, view: &NativeView<Self>) {
-        let e = Engine::launch_with_window(glib::Game::NAME, glib::Game::VERSION,
-            &self.server.upgrade().unwrap(), view, glib::Game::new()).expect("Failed to initialize the engine");
-        e.event_handler_ref().init(&e);
-        *self.engine.borrow_mut() = Some(e);
+        *self.engine.borrow_mut() = Engine::launch_with_window(glib::Game::NAME, glib::Game::VERSION,
+            &self.server.upgrade().unwrap(), view).expect("Failed to initialize the engine").into();
     }
     fn render(&self) { self.engine_mut().do_update(); }
 }

@@ -47,36 +47,20 @@ impl ShaderSpecConstants {
     }
 }
 
+#[allow(dead_code)]
 pub struct Game
 {
-    rp: LateInit<br::RenderPass>, framebuffers: Discardable<Vec<br::Framebuffer>>,
-    framebuffer_commands: Discardable<CommandBundle>, pass_gp: LateInit<LayoutedPipeline>,
-    res: LateInit<MainResources>
+    rp: br::RenderPass, framebuffers: Vec<br::Framebuffer>,
+    framebuffer_commands: CommandBundle, pass_gp: LayoutedPipeline,
+    res: MainResources
 }
-/*impl Game
-{
-    fn launch()
-    {
-        Engine::launch("InfiniteMinesweeper", (0, 1, 0), Game
-        {
-            rp: LateInit::new(), framebuffers: Discardable::new(), framebuffer_commands: Discardable::new(),
-            pass_gp: LateInit::new(), res: LateInit::new()
-        });
-    }
-}*/
 impl Game {
     pub const NAME: &'static str = "Infinitesweeper";
     pub const VERSION: (u32, u32, u32) = (0, 1, 0);
-    pub fn new() -> Self {
-        Game {
-            rp: LateInit::new(), framebuffers: Discardable::new(), framebuffer_commands: Discardable::new(),
-            pass_gp: LateInit::new(), res: LateInit::new()
-        }
-    }
 }
 impl EngineEvents for Game
 {
-    fn init(&self, e: &Engine<Self>)
+    fn init(e: &Engine<Self>) -> Self
     {
         info!("Infinite Minesweeper");
         let rp = br::RenderPassBuilder::new()
@@ -137,15 +121,16 @@ impl EngineEvents for Game
             res.stack.draw_chunked_rects(&res.buffer, &mut rec);
             rec.end_render_pass();
         }
-        
-        self.rp.init(rp); self.framebuffers.set(framebuffers); self.framebuffer_commands.set(framebuffer_commands);
-        self.pass_gp.init(pass_gp); self.res.init(res);
+
+        return Game {
+            rp, framebuffers, framebuffer_commands, pass_gp, res
+        };
     }
     fn update(&self, e: &Engine<Self>, on_backbuffer_of: u32) -> br::SubmissionBatch
     {
         let bb_index = on_backbuffer_of as usize;
         return br::SubmissionBatch {
-            command_buffers: Cow::from(self.framebuffer_commands.get()[bb_index..bb_index+1].to_owned()),
+            command_buffers: Cow::from(self.framebuffer_commands[bb_index..bb_index+1].to_owned()),
             .. Default::default()
         };
     }
