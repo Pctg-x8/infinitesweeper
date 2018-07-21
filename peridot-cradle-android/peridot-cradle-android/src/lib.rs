@@ -10,20 +10,47 @@ use std::ptr::null_mut;
 
 mod peridot;
 mod glib;
-use std::cell::{RefCell, Ref, RefMut};
-use std::rc::{Rc, Weak};
+use std::cell::RefCell;
 
-struct MainWindow(RefCell<Option<peridot::Engine<glib::Game>>>);
+struct MainWindow(RefCell<Option<EngineA>>);
 impl MainWindow {
-    fn new() -> Self {
-        MainWindow(RefCell::new(None))
-    }
+    fn new() -> Self { MainWindow(RefCell::new(None)) }
     fn init(&self, app: &android::App) {
-        *self.0.borrow_mut() = peridot::Engine::launch_with_android_window(glib::Game::NAME, glib::Game::VERSION,
-            app.window).expect("Failed to initialize the engine").into();
+        let amgr = unsafe { android::AssetManager::from_ptr((*app.activity).asset_manager).unwrap() };
+        *self.0.borrow_mut() = peridot::Engine::launch_with_android_window(GameA::NAME, GameA::VERSION,
+            app.window, PlatformAssetLoader::new(amgr)).expect("Failed to initialize the engine").into();
     }
-    fn render(&self) { self.0.borrow_mut().as_mut().unwrap().do_update(); }
+    fn render(&self)
+    {
+        let mut b = self.0.borrow_mut();
+        if let Some(e) = b.as_mut() { e.do_update(); }
+    }
 }
+
+use android::{AssetManager, Asset, AASSET_MODE_STREAMING, AASSET_MODE_RANDOM};
+use std::io::{Result as IOResult, Error as IOError, ErrorKind};
+use std::ffi::CString;
+struct PlatformAssetLoader { amgr: AssetManager }
+impl PlatformAssetLoader {
+    fn new(amgr: AssetManager) -> Self { PlatformAssetLoader { amgr } }
+}
+impl peridot::AssetLoader for PlatformAssetLoader {
+    type Asset = Asset;
+    type StreamingAsset = Asset;
+
+    fn get(&self, path: &str, ext: &str) -> IOResult<Asset> {
+        let mut path_str = path.replace(".", "/"); path_str.push('.'); path_str.push_str(ext);
+        let path_str = CString::new(path_str).unwrap();
+        self.amgr.open(path_str.as_ptr(), AASSET_MODE_RANDOM).ok_or(IOError::new(ErrorKind::NotFound, ""))
+    }
+    fn get_streaming(&self, path: &str, ext: &str) -> IOResult<Asset> {
+        let mut path_str = path.replace(".", "/"); path_str.push('.'); path_str.push_str(ext);
+        let path_str = CString::new(path_str).unwrap();
+        self.amgr.open(path_str.as_ptr(), AASSET_MODE_STREAMING).ok_or(IOError::new(ErrorKind::NotFound, ""))
+    }
+}
+type GameA = glib::Game<PlatformAssetLoader>;
+type EngineA = peridot::Engine<GameA, PlatformAssetLoader>;
 
 #[no_mangle]
 pub extern "C" fn android_main(app: *mut android::App) {
@@ -47,6 +74,7 @@ pub extern "C" fn android_main(app: *mut android::App) {
             if let Some(sref) = unsafe { source.as_mut() } { sref.process(app); }
             if app.destroy_requested != 0 { break 'alp; }
         }
+        mw.render();
     }
 }
 

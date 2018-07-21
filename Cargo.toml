@@ -15,4 +15,4 @@ bitflags = "1.0"
 peridot-vertex-processing-pack = { path = "peridot-vertex-processing-pack" }
 
 [target.'cfg(target_os = "android")'.dependencies]
-android = { path = "android" }
+android = { git = "https://github.com/Pctg-x8/android-defs-rs" }

@@ -11,6 +11,7 @@ use peridot::*;
 use std::borrow::Cow;
 use peridot_vertex_processing_pack::*;
 use std::rc::Rc;
+use std::marker::PhantomData;
 
 // fn main() { env_logger::init(); Game::launch(); }
 
@@ -48,19 +49,20 @@ impl ShaderSpecConstants {
 }
 
 #[allow(dead_code)]
-pub struct Game
+pub struct Game<AL: AssetLoader>
 {
     rp: br::RenderPass, framebuffers: Vec<br::Framebuffer>,
     framebuffer_commands: CommandBundle, pass_gp: LayoutedPipeline,
-    res: MainResources
+    res: MainResources,
+    _p: PhantomData<AL>
 }
-impl Game {
+impl<AL: AssetLoader> Game<AL> {
     pub const NAME: &'static str = "Infinitesweeper";
     pub const VERSION: (u32, u32, u32) = (0, 1, 0);
 }
-impl EngineEvents for Game
+impl<AL: AssetLoader> EngineEvents<AL> for Game<AL>
 {
-    fn init(e: &Engine<Self>) -> Self
+    fn init(e: &Engine<Self, AL>) -> Self
     {
         info!("Infinite Minesweeper");
         let rp = br::RenderPassBuilder::new()
@@ -91,7 +93,8 @@ impl EngineEvents for Game
             tb.sink_graphics_ready_commands(r);
         }).unwrap();
 
-        let pvp_pass = PvpContainerReader::from_file("assets/shaders/pass.pvp").unwrap().into_container().unwrap();
+        trace!("Loading assets/shaders/pass.pvp...");
+        let pvp_pass: PvpContainer = e.load("shaders.pass").expect("Asset not found");
         let pass_shaders = PvpShaderModules::new(&e.graphics_device(), pvp_pass).unwrap();
         let u0_layout: Rc<_> = br::PipelineLayout::new(&e.graphics_device(), &[&res.dsl_u0], &[]).unwrap().into();
         let screen_spec = ShaderSpecConstants {
@@ -123,10 +126,10 @@ impl EngineEvents for Game
         }
 
         return Game {
-            rp, framebuffers, framebuffer_commands, pass_gp, res
+            rp, framebuffers, framebuffer_commands, pass_gp, res, _p: PhantomData
         };
     }
-    fn update(&self, e: &Engine<Self>, on_backbuffer_of: u32) -> br::SubmissionBatch
+    fn update(&self, e: &Engine<Self, AL>, on_backbuffer_of: u32) -> br::SubmissionBatch
     {
         let bb_index = on_backbuffer_of as usize;
         return br::SubmissionBatch {
@@ -186,7 +189,7 @@ struct MainResources {
     stack: ResourceStack, buffer: Buffer, dsl_u0: br::DescriptorSetLayout, _dpool: br::DescriptorPool, dsets: Vec<br::vk::VkDescriptorSet>
 }
 impl MainResources {
-    fn init(e: &Engine<Game>, transfer_batch: &mut TransferBatch, dsu_batch: &mut DescriptorSetUpdateBatch) -> br::Result<Self> {
+    fn init<AL: AssetLoader>(e: &Engine<Game<AL>, AL>, transfer_batch: &mut TransferBatch, dsu_batch: &mut DescriptorSetUpdateBatch) -> br::Result<Self> {
         let g = e.graphics();
         let gd = e.graphics_device();
 

@@ -15,8 +15,12 @@ use std::rc::{Rc, Weak};
 use std::cell::{UnsafeCell, RefCell, Ref, RefMut};
 use peridot::Engine;
 use std::io::Result as IOResult;
+use std::path::PathBuf;
 
 mod glib;
+
+type GameT = glib::Game<PlatformAssetLoader>;
+type EngineT = Engine<GameT, PlatformAssetLoader>;
 
 struct App(UnsafeCell<Option<Rc<MainWindow>>>);
 impl EventDelegate for App {
@@ -28,31 +32,60 @@ impl EventDelegate for App {
 }
 struct MainWindow {
     server: Weak<GUIApplication<App>>, inner: UnsafeCell<Option<NativeWindow<MainWindow>>>,
-    engine: RefCell<Option<Engine<glib::Game>>>
+    engine: RefCell<Option<EngineT>>
 }
 impl MainWindow {
     fn new(server: &Rc<GUIApplication<App>>) -> IOResult<Rc<Self>> {
         let this = Rc::new(MainWindow {
             server: Rc::downgrade(server), inner: UnsafeCell::new(None), engine: RefCell::new(None)
         });
-        let w = NativeWindowBuilder::new(512 * 10 / 16, 512, glib::Game::NAME)
+        let w = NativeWindowBuilder::new(512 * 10 / 16, 512, GameT::NAME)
             .resizable(false).create_renderable(server, &this)?;
         unsafe { *this.inner.get() = Some(w); }
         return Ok(this);
     }
     fn inner_ref(&self) -> &NativeWindow<Self> { unsafe { (*self.inner.get()).as_ref().unwrap() } }
     #[allow(dead_code)]
-    fn engine_ref(&self) -> Ref<Engine<glib::Game>> { Ref::map(self.engine.borrow(), |r| r.as_ref().unwrap()) }
-    fn engine_mut(&self) -> RefMut<Engine<glib::Game>> { RefMut::map(self.engine.borrow_mut(), |r| r.as_mut().unwrap()) }
+    fn engine_ref(&self) -> Ref<EngineT> { Ref::map(self.engine.borrow(), |r| r.as_ref().unwrap()) }
+    fn engine_mut(&self) -> RefMut<EngineT> { RefMut::map(self.engine.borrow_mut(), |r| r.as_mut().unwrap()) }
 }
 impl WindowEventDelegate for MainWindow {
     type ClientDelegate = App;
 
     fn init_view(&self, view: &NativeView<Self>) {
-        *self.engine.borrow_mut() = Engine::launch_with_window(glib::Game::NAME, glib::Game::VERSION,
-            &self.server.upgrade().unwrap(), view).expect("Failed to initialize the engine").into();
+        *self.engine.borrow_mut() = Engine::launch_with_window(GameT::NAME, GameT::VERSION,
+            &self.server.upgrade().unwrap(), view, PlatformAssetLoader::new()).expect("Failed to initialize the engine").into();
     }
     fn render(&self) { self.engine_mut().do_update(); }
+}
+
+use std::fs::File;
+struct PlatformAssetLoader { base_path: PathBuf }
+impl PlatformAssetLoader {
+    fn new() -> Self {
+        let mut base_path = std::env::current_exe().expect("Couldn't find Path of Executable");
+        base_path.pop(); base_path.push("assets");
+        return PlatformAssetLoader { base_path }
+    }
+}
+impl peridot::AssetLoader for PlatformAssetLoader {
+    type Asset = File;
+    type StreamingAsset = File;
+
+    fn get(&self, path: &str, ext: &str) -> IOResult<File> {
+        let mut asset_path = self.base_path.clone();
+        asset_path.extend(path.split("."));
+        asset_path.set_extension(ext);
+        debug!("Loading Asset: {}...", asset_path.display());
+        return File::open(&asset_path);
+    }
+    fn get_streaming(&self, path: &str, ext: &str) -> IOResult<File> {
+        let mut asset_path = self.base_path.clone();
+        asset_path.extend(path.split("."));
+        asset_path.set_extension(ext);
+        debug!("Loading Asset: {}...", asset_path.display());
+        return File::open(&asset_path);
+    }
 }
 
 fn main() {

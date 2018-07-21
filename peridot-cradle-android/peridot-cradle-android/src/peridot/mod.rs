@@ -11,37 +11,70 @@ mod window; use self::window::WindowRenderTargets;
 mod resource; pub use self::resource::*;
 #[cfg(debug_assertions)] mod debug; #[cfg(debug_assertions)] use self::debug::DebugReport;
 
-pub trait EngineEvents : Sized {
-    fn init(_e: &Engine<Self>) -> Self;
-    fn update(&self, _e: &Engine<Self>, _on_backbuffer_of: u32) -> br::SubmissionBatch { br::SubmissionBatch::default() }
+pub trait EngineEvents<AL: AssetLoader> : Sized {
+    fn init(_e: &Engine<Self, AL>) -> Self;
+    fn update(&self, _e: &Engine<Self, AL>, _on_backbuffer_of: u32) -> br::SubmissionBatch { br::SubmissionBatch::default() }
 }
-impl EngineEvents for () { fn init(_e: &Engine<Self>) -> Self { () } }
+impl<AL: AssetLoader> EngineEvents<AL> for () { fn init(_e: &Engine<Self, AL>) -> Self { () } }
 
-pub struct Engine<E: EngineEvents> {
-    surface: window::SurfaceInfo, wrt: WindowRenderTargets,
-    pub(self) g: Graphics, event_handler: Option<E>
+use std::io::{Read, Seek, Result as IOResult, BufReader};
+pub trait AssetLoader {
+    type Asset: Read + Seek;
+    type StreamingAsset: Read;
+
+    fn get(&self, path: &str, ext: &str) -> IOResult<Self::Asset>;
+    fn get_streaming(&self, path: &str, ext: &str) -> IOResult<Self::StreamingAsset>;
 }
-impl<E: EngineEvents> Engine<E> {
+pub trait LogicalAssetData: Sized {
+    fn ext() -> &'static str;
+}
+pub trait FromAsset: LogicalAssetData {
+    fn from_asset<Asset: Read + Seek>(asset: Asset) -> IOResult<Self>;
+}
+pub trait FromStreamingAsset: LogicalAssetData {
+    fn from_asset<Asset: Read>(asset: Asset) -> IOResult<Self>;
+}
+use peridot_vertex_processing_pack::*;
+impl LogicalAssetData for PvpContainer { fn ext() -> &'static str { "pvp" } }
+impl FromAsset for PvpContainer {
+    fn from_asset<Asset: Read + Seek>(asset: Asset) -> IOResult<Self> {
+        PvpContainerReader::new(BufReader::new(asset)).and_then(PvpContainerReader::into_container)
+    }
+}
+
+pub struct Engine<E: EngineEvents<AL>, AL: AssetLoader> {
+    surface: window::SurfaceInfo, wrt: WindowRenderTargets,
+    pub(self) g: Graphics, event_handler: Option<E>, asset_loader: AL
+}
+impl<E: EngineEvents<AL>, AL: AssetLoader> Engine<E, AL> {
     #[cfg(target_os = "android")]
-    pub fn launch_with_android_window(name: &str, version: (u32, u32, u32), window: *mut ANativeWindow) -> br::Result<Self> {
+    pub fn launch_with_android_window(name: &str, version: (u32, u32, u32), window: *mut ANativeWindow, asset_loader: AL)
+            -> br::Result<Self> {
         let g = Graphics::new(name, version)?;
         let surface = window::SurfaceInfo::new(&g, window)?;
         let wrt = WindowRenderTargets::new(&g, &surface, window)?;
-        let mut this = Engine { g, surface, wrt, event_handler: None };
+        let mut this = Engine { g, surface, wrt, event_handler: None, asset_loader };
         let eh = E::init(&this);
         this.event_handler = Some(eh);
         return Ok(this);
     }
     #[cfg(not(target_os = "android"))]
     pub fn launch_with_window<WE: WindowEventDelegate>(name: &str, version: (u32, u32, u32),
-            server: &GUIApplication<WE::ClientDelegate>, view: &NativeView<WE>) -> br::Result<Self> {
+            server: &GUIApplication<WE::ClientDelegate>, view: &NativeView<WE>, asset_loader: AL) -> br::Result<Self> {
         let g = Graphics::new(name, version)?;
         let surface = window::SurfaceInfo::new(server, &g, view)?;
         let wrt = WindowRenderTargets::new(&g, &surface, view)?;
-        let mut this = Engine { g, surface, wrt, event_handler: None };
+        let mut this = Engine { g, surface, wrt, event_handler: None, asset_loader };
         let eh = E::init(&this);
         this.event_handler = Some(eh);
         return Ok(this);
+    }
+
+    pub fn load<A: FromAsset>(&self, path: &str) -> IOResult<A> {
+        self.asset_loader.get(path, A::ext()).and_then(A::from_asset)
+    }
+    pub fn streaming<A: FromStreamingAsset>(&self, path: &str) -> IOResult<A> {
+        self.asset_loader.get_streaming(path, A::ext()).and_then(A::from_asset)
     }
 
     pub fn graphics(&self) -> &Graphics { &self.g }
@@ -89,7 +122,7 @@ impl<E: EngineEvents> Engine<E> {
         self.event_handler.init(self);
     }
 }*/
-impl<E: EngineEvents> Drop for Engine<E> {
+impl<E: EngineEvents<AL>, AL: AssetLoader> Drop for Engine<E, AL> {
     fn drop(&mut self) {
         self.graphics().device.wait().unwrap();
     }
@@ -122,7 +155,7 @@ pub struct Graphics
     #[cfg(debug_assertions)] _d: DebugReport,
     cp_onetime_submit: br::CommandPool,
     acquiring_backbuffer: br::Semaphore, present_ordering: br::Semaphore,
-    memory_type_index_cache: RefCell<BTreeMap<u32, u32>>
+    memory_type_index_cache: RefCell<BTreeMap<(u32, u32), u32>>
 }
 impl Graphics
 {
@@ -201,13 +234,16 @@ impl Graphics
         }
     }
 
-    pub(self) fn memory_type_index_for(&self, mask: br::MemoryPropertyFlags) -> Option<u32> {
-        if let Some(&mi) = self.memory_type_index_cache.borrow().get(&mask.bits()) { return Some(mi); }
-        if let Some(n) = self.adapter.memory_properties().find_type_index(mask, br::MemoryPropertyFlags::LAZILY_ALLOCATED.host_cached()) {
-            self.memory_type_index_cache.borrow_mut().insert(mask.bits(), n);
-            return Some(n);
+    pub(self) fn memory_type_index_for(&self, mask: br::MemoryPropertyFlags, index_mask: u32) -> Option<u32> {
+        if let Some(&mi) = self.memory_type_index_cache.borrow().get(&(mask.bits(), index_mask)) { return Some(mi); }
+        for (n, m) in self.adapter.memory_properties().types().enumerate() {
+            if ((1 << n) & index_mask) != 0 && (m.propertyFlags & mask.bits()) != 0 &&
+                    (m.propertyFlags & br::MemoryPropertyFlags::LAZILY_ALLOCATED.bits()) == 0 {
+                self.memory_type_index_cache.borrow_mut().insert((mask.bits(), index_mask), n as _);
+                return Some(n as _);
+            }
         }
-        else { return None; }
+        return None;
     }
 
     #[cfg(not(target_os = "android"))]

@@ -5,7 +5,10 @@ use bedrock as br;
 
 use std::mem::{uninitialized, replace, forget};
 
-pub(super) struct SurfaceInfo { obj: br::Surface, fmt: br::vk::VkSurfaceFormatKHR, pres_mode: br::PresentMode }
+pub(super) struct SurfaceInfo {
+    obj: br::Surface, fmt: br::vk::VkSurfaceFormatKHR, pres_mode: br::PresentMode,
+    available_composite_alpha: br::CompositeAlpha
+}
 impl SurfaceInfo
 {
     #[cfg(target_os = "android")]
@@ -31,7 +34,15 @@ impl SurfaceInfo
         let &pres_mode = pres_modes.iter().find(|&&m| m == br::PresentMode::FIFO || m == br::PresentMode::Mailbox)
             .unwrap_or(&pres_modes[0]);
         
-        return Ok(SurfaceInfo { obj, fmt, pres_mode });
+        let caps = g.adapter.surface_capabilities(&obj)?;
+        let available_composite_alpha = if (caps.supportedCompositeAlpha & (br::CompositeAlpha::Inherit as u32)) != 0 {
+            br::CompositeAlpha::Inherit
+        }
+        else {
+            br::CompositeAlpha::Opaque
+        };
+        
+        return Ok(SurfaceInfo { obj, fmt, pres_mode, available_composite_alpha });
     }
     pub fn format(&self) -> br::vk::VkFormat { self.fmt.format }
 }
@@ -53,7 +64,7 @@ impl WindowRenderTargets
         let buffer_count = 2.max(si.minImageCount).min(si.maxImageCount);
         let chain = br::SwapchainBuilder::new(&s.obj, buffer_count, &s.fmt, &ext, br::ImageUsage::COLOR_ATTACHMENT)
             .present_mode(s.pres_mode)
-            .composite_alpha(br::CompositeAlpha::Opaque).pre_transform(br::SurfaceTransform::Identity)
+            .composite_alpha(s.available_composite_alpha).pre_transform(br::SurfaceTransform::Identity)
             .create(&g.device)?;
         
         let isr_c0 = br::ImageSubresourceRange::color(0, 0);
