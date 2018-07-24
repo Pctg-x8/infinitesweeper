@@ -93,10 +93,10 @@ impl<AL: AssetLoader> EngineEvents<AL> for Game<AL>
             tb.sink_graphics_ready_commands(r);
         }).unwrap();
 
-        trace!("Loading assets/shaders/pass.pvp...");
         let pvp_pass: PvpContainer = e.load("shaders.pass").expect("Asset not found");
         let pass_shaders = PvpShaderModules::new(&e.graphics_device(), pvp_pass).unwrap();
-        let u0_layout: Rc<_> = br::PipelineLayout::new(&e.graphics_device(), &[&res.dsl_u0], &[]).unwrap().into();
+        let u0_layout: Rc<_> = br::PipelineLayout::new(&e.graphics_device(), &[&res.dsl_u0],
+            &[(br::ShaderStage::VERTEX, 0 .. size_of::<VertexPlacementUniformData>() as _)]).unwrap().into();
         let screen_spec = ShaderSpecConstants {
             screen_aspect_wh: filling_viewport.width / filling_viewport.height,
             emboss_thickness: 0.05
@@ -120,8 +120,12 @@ impl<AL: AssetLoader> EngineEvents<AL> for Game<AL>
             let mut rec = cb.begin().expect("Beginning Recording commands");
             rec.begin_render_pass(&rp, fb, framebuffer_size.clone(), &[br::ClearValue::Color([0.0; 4])], true);
             pass_gp.bind(&mut rec);
-            rec.bind_graphics_descriptor_sets(0, &[res.dsets[0]], &[]);
-            res.stack.draw_chunked_rects(&res.buffer, &mut rec);
+            res.stack.setup_for_draw_chunked_rects(&res.buffer, &mut rec);
+            rec.bind_graphics_descriptor_sets(0, &[res.dset_render_offset], &[]);
+            for v in VPUD {
+                rec .push_graphics_constant(br::ShaderStage::VERTEX, 0, v)
+                    .draw_indexed((6 * CHUNK_SIZE * CHUNK_SIZE) as _, 1, 0, 0, 0);
+            }
             rec.end_render_pass();
         }
 
@@ -142,29 +146,30 @@ impl<AL: AssetLoader> EngineEvents<AL> for Game<AL>
 #[repr(C)] #[derive(Clone, PartialEq)]
 pub struct VertexPlacementUniformData { pub offs: [f32; 2], pub scale: [f32; 2], pub chunk_offs: [f32; 2] }
 
+static VPUD: &[VertexPlacementUniformData] = &[
+    VertexPlacementUniformData { offs: [0.0, 0.0], scale: [0.125, 0.125], chunk_offs: [  0.0,   0.0] },
+    VertexPlacementUniformData { offs: [0.0, 0.0], scale: [0.125, 0.125], chunk_offs: [-16.0,   0.0] },
+    VertexPlacementUniformData { offs: [0.0, 0.0], scale: [0.125, 0.125], chunk_offs: [  0.0, -16.0] },
+    VertexPlacementUniformData { offs: [0.0, 0.0], scale: [0.125, 0.125], chunk_offs: [-16.0, -16.0] },
+    VertexPlacementUniformData { offs: [0.0, 0.0], scale: [0.125, 0.125], chunk_offs: [  0.0,  16.0] },
+    VertexPlacementUniformData { offs: [0.0, 0.0], scale: [0.125, 0.125], chunk_offs: [-16.0, -16.0] }
+];
+
 pub struct ResourceStack {
-    chunked_rects_vb: usize, chunked_rects_ib: usize,
-    vertex_placement_ub: usize
+    chunked_rects_vb: usize, chunked_rects_ib: usize, render_offset_ub: usize
 }
 impl ResourceStack {
     pub fn init(bp: &mut BufferPrealloc) -> Self {
         ResourceStack {
             chunked_rects_vb: bp.add(BufferContent::vertex::<[[f32; 4]; 4 * CHUNK_SIZE * CHUNK_SIZE]>()),
             chunked_rects_ib: bp.add(BufferContent::index::<[u16; 6 * CHUNK_SIZE * CHUNK_SIZE]>()),
-            vertex_placement_ub: bp.add(BufferContent::uniform::<[VertexPlacementUniformData; 6]>())
+            render_offset_ub: bp.add(BufferContent::uniform::<[f32; 2]>())
         }
     }
     pub fn init_data(&self, mem: &br::MappedMemoryRange) {
         unsafe {
             Self::init_chunk_rects(mem.get_mut(self.chunked_rects_vb), mem.get_mut(self.chunked_rects_ib));
-            mem.get_mut::<[VertexPlacementUniformData; 6]>(self.vertex_placement_ub).clone_from_slice(&[
-                VertexPlacementUniformData { offs: [0.0, 0.0], scale: [0.125, 0.125], chunk_offs: [  0.0,   0.0] },
-                VertexPlacementUniformData { offs: [0.0, 0.0], scale: [0.125, 0.125], chunk_offs: [-16.0,   0.0] },
-                VertexPlacementUniformData { offs: [0.0, 0.0], scale: [0.125, 0.125], chunk_offs: [  0.0, -16.0] },
-                VertexPlacementUniformData { offs: [0.0, 0.0], scale: [0.125, 0.125], chunk_offs: [-16.0, -16.0] },
-                VertexPlacementUniformData { offs: [0.0, 0.0], scale: [0.125, 0.125], chunk_offs: [  0.0,  16.0] },
-                VertexPlacementUniformData { offs: [0.0, 0.0], scale: [0.125, 0.125], chunk_offs: [-16.0, -16.0] }
-            ]);
+            mem.get_mut::<[f32; 2]>(self.render_offset_ub).copy_from_slice(&[0.0, 0.0]);
         }
     }
     fn init_chunk_rects(vertices: &mut [[f32; 4]; 4 * CHUNK_SIZE * CHUNK_SIZE], indices: &mut [u16; 6 * CHUNK_SIZE * CHUNK_SIZE]) {
@@ -180,13 +185,17 @@ impl ResourceStack {
             ]);
         }
     }
+    pub fn setup_for_draw_chunked_rects(&self, buf: &br::Buffer, rec: &mut br::CmdRecord) {
+        rec .bind_vertex_buffers(0, &[(buf, self.chunked_rects_vb)])
+            .bind_index_buffer(&buf, self.chunked_rects_ib, br::IndexType::U16);
+    }
     pub fn draw_chunked_rects(&self, buf: &br::Buffer, rec: &mut br::CmdRecord) {
-        rec.bind_vertex_buffers(0, &[(buf, self.chunked_rects_vb)]).bind_index_buffer(&buf, self.chunked_rects_ib, br::IndexType::U16)
-            .draw_indexed((6 * CHUNK_SIZE * CHUNK_SIZE) as _, 1, 0, 0, 0);
+        self.setup_for_draw_chunked_rects(buf, rec);
+        rec.draw_indexed((6 * CHUNK_SIZE * CHUNK_SIZE) as _, 1, 0, 0, 0);
     }
 }
 struct MainResources {
-    stack: ResourceStack, buffer: Buffer, dsl_u0: br::DescriptorSetLayout, _dpool: br::DescriptorPool, dsets: Vec<br::vk::VkDescriptorSet>
+    stack: ResourceStack, buffer: Buffer, dsl_u0: br::DescriptorSetLayout, _dpool: br::DescriptorPool, dset_render_offset: br::vk::VkDescriptorSet
 }
 impl MainResources {
     fn init<AL: AssetLoader>(e: &Engine<Game<AL>, AL>, transfer_batch: &mut TransferBatch, dsu_batch: &mut DescriptorSetUpdateBatch) -> br::Result<Self> {
@@ -204,11 +213,11 @@ impl MainResources {
             .. br::DSLBindings::empty()
         })?;
         let dpool = br::DescriptorPool::new(&gd, 1, &[br::DescriptorPoolSize(br::DescriptorType::UniformBuffer, 1)], false)?;
-        let dsets = dpool.alloc(&[&dsl_u0])?;
+        let dset_render_offset = dpool.alloc(&[&dsl_u0])?[0];
         
         transfer_batch.add_mirroring_buffer(&buffer_upload, &buffer, 0, bp.total_size() as _);
-        dsu_batch.write(dsets[0], 0,
-            br::DescriptorUpdateInfo::UniformBuffer(vec![(buffer.native_ptr(), rs.vertex_placement_ub .. bp.total_size())]));
-        return Ok(MainResources { stack: rs, buffer, dsl_u0, _dpool: dpool, dsets });
+        dsu_batch.write(dset_render_offset, 0,
+            br::DescriptorUpdateInfo::UniformBuffer(vec![(buffer.native_ptr(), rs.render_offset_ub .. bp.total_size())]));
+        return Ok(MainResources { stack: rs, buffer, dsl_u0, _dpool: dpool, dset_render_offset });
     }
 }
