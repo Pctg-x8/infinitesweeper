@@ -7,7 +7,17 @@ use regex::Regex;
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DeclarationOps { VertexInput, VertexShader, FragmentShader, Varyings, SpecConstant, Uniform }
+pub enum DeclarationOps { VertexInput, VertexShader, FragmentShader, Varyings, SpecConstant, Uniform, PushConstant }
+
+pub type ParseResult<T> = Result<T, ()>;
+
+trait CharIterationExt : Iterator<Item = char> + Sized {
+    fn count_with_bytes(self) -> (usize, usize) { self.fold((0, 0), |(c, b), cc| (c + 1, b + cc.len_utf8())) }
+    fn count_with_bytes_while<P: Fn(char) -> bool>(self, pred: P) -> (usize, usize) {
+        self.take_while(|&c| pred(c)).fold((0, 0), |(c, b), cc| (c + 1, b + cc.len_utf8()))
+    }
+}
+impl<I: Iterator<Item = char>> CharIterationExt for I {}
 
 pub struct Tokenizer<'s>(&'s str);
 impl<'s> Tokenizer<'s> {
@@ -15,7 +25,7 @@ impl<'s> Tokenizer<'s> {
 
     fn strip_comment(&mut self) -> bool {
         if self.strip_prefix("//") {
-            let strip_bytes = self.0.chars().take_while(|&c| c != '\n').fold(0, |a, c| a + c.len_utf8());
+            let (_, strip_bytes) = self.0.chars().count_with_bytes_while(|c| c != '\n');
             self.0 = &self.0[strip_bytes..];
             return true;
         }
@@ -30,133 +40,141 @@ impl<'s> Tokenizer<'s> {
         if self.0.starts_with(p) { self.0 = &self.0[p.len()..]; return true; }
         else { false }
     }
-    fn strip_ident(&mut self) -> Option<&'s str> {
-        if self.0.starts_with(|c: char| c.is_digit(10)) { return None; }
-        let bytes = self.0.chars().take_while(|&c| c.is_alphanumeric() || c == '_').fold(0, |a, c| a + c.len_utf8());
-        if bytes == 0 { return None; }
+    fn strip_ident(&mut self) -> ParseResult<&'s str> {
+        if self.0.starts_with(|c: char| c.is_digit(10)) { return Err(()); }
+        let (_, bytes) = self.0.chars().count_with_bytes_while(|c| c.is_alphanumeric() || c == '_');
+        if bytes == 0 { return Err(()); }
         let slice = &self.0[..bytes]; self.0 = &self.0[bytes..];
-        return Some(slice);
+        return Ok(slice);
     }
     pub fn ident_list(&mut self) -> Vec<&'s str> {
         self.strip_ignores();
-        let v0 = if let Some(id) = self.strip_ident() { id } else { return Vec::new(); };
-        let mut v = vec![v0];
+        let mut v = if let Ok(id) = self.strip_ident() { vec![id] } else { return Vec::new(); };
         while self.strip_ignores().strip_prefix(",") {
-            if let Some(id) = self.strip_ignores().strip_ident() { v.push(id); } else { break; }
+            if let Ok(id) = self.strip_ignores().strip_ident() { v.push(id); } else { break; }
         }
         return v;
     }
 
-    pub fn glsl_type_ascription(&mut self) -> Option<&'s str> {
+    /// : ...
+    pub fn glsl_type_ascription(&mut self) -> ParseResult<&'s str> {
         self.strip_ignores();
-        if !self.strip_prefix(":") { return None; }
+        if !self.strip_prefix(":") { return Err(()); }
         return self.glsl_represents_until_decl_end();
     }
-    pub fn glsl_type_ascription_until(&mut self, term_chars: &[char]) -> Option<&'s str> {
+    /// : ... <term_char>
+    pub fn glsl_type_ascription_until(&mut self, term_chars: &[char]) -> ParseResult<&'s str> {
         self.strip_ignores();
-        if !self.strip_prefix(":") { return None; }
+        if !self.strip_prefix(":") { return Err(()); }
         return self.glsl_represents_until(term_chars);
     }
-    pub fn glsl_represents_until_decl_end(&mut self) -> Option<&'s str> {
+    pub fn glsl_represents_until_decl_end(&mut self) -> ParseResult<&'s str> {
         self.strip_ignores();
-        let glsl_strip_bytes = self.0.chars().take_while(|&c| c != ';' && c != '@').fold(0, |a, c| a + c.len_utf8());
-        if glsl_strip_bytes == 0 { return None; }
+        let (_, glsl_strip_bytes) = self.0.chars().count_with_bytes_while(|c| c != ';' && c != '@');
+        if glsl_strip_bytes == 0 { return Err(()); }
         let glsl_strip = &self.0[..glsl_strip_bytes];
         self.0 = &self.0[glsl_strip_bytes..];
-        return Some(glsl_strip);
+        return Ok(glsl_strip);
     }
-    pub fn glsl_represents_until(&mut self, term_chars: &[char]) -> Option<&'s str> {
+    pub fn glsl_represents_until(&mut self, term_chars: &[char]) -> ParseResult<&'s str> {
         self.strip_ignores();
-        let glsl_strip_bytes = self.0.chars().take_while(|&c| term_chars.iter().all(|&cc| cc != c)).fold(0, |a, c| a + c.len_utf8());
-        if glsl_strip_bytes == 0 { return None; }
+        let (_, glsl_strip_bytes) = self.0.chars().count_with_bytes_while(|c| term_chars.iter().all(|&cc| cc != c));
+        if glsl_strip_bytes == 0 { return Err(()); }
         let glsl_strip = &self.0[..glsl_strip_bytes];
         self.0 = &self.0[glsl_strip_bytes..];
-        return Some(glsl_strip);
+        return Ok(glsl_strip);
+    }
+    
+    pub fn index_number(&mut self) -> ParseResult<usize> {
+        self.strip_ignores();
+        let (_, num_bytes) = self.0.chars().count_with_bytes_while(|c| c.is_digit(10));
+        if let Ok(n) = usize::from_str(&self.0[..num_bytes]) {
+            self.0 = &self.0[num_bytes..];
+            return Ok(n);
+        }
+        else { Err(()) }
     }
 
-    pub fn declaration_op(&mut self) -> Option<DeclarationOps> {
+    pub fn declaration_op(&mut self) -> ParseResult<DeclarationOps> {
         self.strip_ignores();
-        if self.strip_prefix("FragmentShader") { return Some(DeclarationOps::FragmentShader); }
-        if self.strip_prefix("SpecConstant") { return Some(DeclarationOps::SpecConstant); }
-        if self.strip_prefix("VertexShader") { return Some(DeclarationOps::VertexShader); }
-        if self.strip_prefix("VertexInput") { return Some(DeclarationOps::VertexInput); }
-        if self.strip_prefix("Varyings") { return Some(DeclarationOps::Varyings); }
-        if self.strip_prefix("Uniform") { return Some(DeclarationOps::Uniform); }
-        return None;
+        if self.strip_prefix("FragmentShader") { return Ok(DeclarationOps::FragmentShader); }
+        if self.strip_prefix("SpecConstant") { return Ok(DeclarationOps::SpecConstant); }
+        if self.strip_prefix("VertexShader") { return Ok(DeclarationOps::VertexShader); }
+        if self.strip_prefix("PushConstant") { return Ok(DeclarationOps::PushConstant); }
+        if self.strip_prefix("VertexInput") { return Ok(DeclarationOps::VertexInput); }
+        if self.strip_prefix("Varyings") { return Ok(DeclarationOps::Varyings); }
+        if self.strip_prefix("Uniform") { return Ok(DeclarationOps::Uniform); }
+        return Err(());
     }
-    pub fn shader_stage(&mut self) -> Option<br::ShaderStage> {
+    pub fn shader_stage(&mut self) -> ParseResult<br::ShaderStage> {
         self.strip_ignores();
-        if self.strip_prefix("FragmentShader") { return Some(br::ShaderStage::FRAGMENT); }
-        if self.strip_prefix("VertexShader") { return Some(br::ShaderStage::VERTEX); }
-        return None;
+        if self.strip_prefix("FragmentShader") { return Ok(br::ShaderStage::FRAGMENT); }
+        if self.strip_prefix("VertexShader") { return Ok(br::ShaderStage::VERTEX); }
+        return Err(());
     }
-    pub fn bracketed_stage(&mut self) -> Option<br::ShaderStage> {
+    pub fn bracketed_stage(&mut self) -> ParseResult<br::ShaderStage> {
         self.strip_ignores();
-        if !self.bracket_start() { return None; }
-        let st = if let Some(s) = self.shader_stage() { s } else { return None; };
-        if !self.bracket_end() { return None; }
-        return Some(st);
+        if !self.bracket_start() { return Err(()); }
+        let st = self.shader_stage()?;
+        if !self.bracket_end() { return Err(()); }
+        return Ok(st);
     }
-    pub fn codeblock(&mut self) -> Option<&'s str> {
+    pub fn codeblock(&mut self) -> ParseResult<&'s str> {
         self.strip_ignores();
-        if !self.block_start() { return None; }
-        fn strip_bytes_counter<I: Iterator<Item = char>>(mut c: I, current: usize, nestlevel: usize) -> Option<usize> {
+        if !self.block_start() { return Err(()); }
+        fn strip_bytes_counter<I: Iterator<Item = char>>(mut c: I, current: usize, nestlevel: usize) -> ParseResult<usize> {
             match c.next() {
                 Some(cc @ '{') => strip_bytes_counter(c, current + cc.len_utf8(), nestlevel + 1),
-                Some(cc @ '}') => if nestlevel == 0 { Some(current) }
+                Some(cc @ '}') => if nestlevel == 0 { Ok(current) }
                     else { strip_bytes_counter(c, current + cc.len_utf8(), nestlevel - 1) },
                 Some(cc) => strip_bytes_counter(c, current + cc.len_utf8(), nestlevel),
-                None => None
+                None => Err(())
             }
         }
         let cb_slice_bytes = strip_bytes_counter(self.0.chars(), 0, 0).expect("Missing closing brace");
         let cb_slice = &self.0[..cb_slice_bytes];
         self.0 = &self.0[cb_slice_bytes + 1..];
-        return Some(cb_slice);
+        return Ok(cb_slice);
     }
-    pub fn binding(&mut self) -> Option<(usize, br::vk::VkVertexInputRate)> {
+    pub fn binding(&mut self) -> ParseResult<(usize, br::vk::VkVertexInputRate)> {
         self.strip_ignores();
-        if !self.strip_prefix("Binding") { return None; }
-        let index = if let Some(n) = self.index_number() { n } else { return None; };
-        let irate = if self.bracket_start() {
+        if !self.strip_prefix("Binding") { return Err(()); }
+        let index = self.index_number()?;
+        let irate;
+        if self.bracket_start() {
             self.strip_ignores();
-            let r =
-                if self.strip_prefix("PerInstance") { br::vk::VK_VERTEX_INPUT_RATE_INSTANCE }
-                else if self.strip_prefix("PerVertex") { br::vk::VK_VERTEX_INPUT_RATE_VERTEX }
-                else { return None };
-            if !self.bracket_end() { return None; } else { r }
+            if self.strip_prefix("PerInstance") { irate = br::vk::VK_VERTEX_INPUT_RATE_INSTANCE; }
+            else if self.strip_prefix("PerVertex") { irate = br::vk::VK_VERTEX_INPUT_RATE_VERTEX; }
+            else { return Err(()); }
+            if !self.bracket_end() { return Err(()); }
         }
-        else { br::vk::VK_VERTEX_INPUT_RATE_VERTEX };
-        return (index, irate).into();
+        else { irate = br::vk::VK_VERTEX_INPUT_RATE_VERTEX; }
+        return Ok((index, irate));
     }
     /// `SpecConstant` v <BracketedStage> `(` <IndexNumber> `)`
-    pub fn spec_constant_header_rest(&mut self) -> Option<(br::ShaderStage, usize)> {
+    pub fn spec_constant_header_rest(&mut self) -> ParseResult<(br::ShaderStage, usize)> {
         self.strip_ignores();
-        let stg = if let Some(s) = self.bracketed_stage() { s } else { return None; };
-        if !self.strip_ignores().strip_prefix("(") { return None; }
-        let idx = if let Some(n) = self.index_number() { n } else { return None; };
-        if !self.strip_ignores().strip_prefix(")") { return None; }
-        return Some((stg, idx));
+        let stg = self.bracketed_stage()?;
+        if !self.strip_ignores().strip_prefix("(") { return Err(()); }
+        let idx = self.index_number()?;
+        if !self.strip_ignores().strip_prefix(")") { return Err(()); }
+        return Ok((stg, idx));
     }
     /// `Uniform` v <BracketedStage> `(` <IndexNumber> `,` <IndexNumber> `)`
-    pub fn uniform_header_rest(&mut self) -> Option<(br::ShaderStage, usize, usize)> {
+    pub fn uniform_header_rest(&mut self) -> ParseResult<(br::ShaderStage, usize, usize)> {
         self.strip_ignores();
-        let stg = if let Some(s) = self.bracketed_stage() { s } else { return None; };
-        if !self.strip_ignores().strip_prefix("(") { return None; }
-        let set = if let Some(n) = self.index_number() { n } else { return None; };
-        if !self.strip_ignores().strip_prefix(",") { return None; }
-        let binding = if let Some(n) = self.index_number() { n } else { return None; };
-        if !self.strip_ignores().strip_prefix(")") { return None; }
-        return Some((stg, set, binding));
+        let stg = self.bracketed_stage()?;
+        if !self.strip_ignores().strip_prefix("(") { return Err(()); }
+        let set = self.index_number()?;
+        if !self.strip_ignores().strip_prefix(",") { return Err(()); }
+        let binding = self.index_number()?;
+        if !self.strip_ignores().strip_prefix(")") { return Err(()); }
+        return Ok((stg, set, binding));
     }
-
-    pub fn index_number(&mut self) -> Option<usize> {
+    /// `PushConstant` v <BracketStage> `(` <IndexNumber> `)`
+    pub fn push_constant_header_rest(&mut self) -> ParseResult<br::ShaderStage> {
         self.strip_ignores();
-        let num_bytes = self.0.chars().take_while(|&c| c.is_digit(10)).fold(0, |a, c| a + c.len_utf8());
-        if let Ok(n) = usize::from_str(&self.0[..num_bytes]) {
-            self.0 = &self.0[num_bytes..]; return Some(n);
-        }
-        else { None }
+        return self.bracketed_stage();
     }
 
     pub fn block_start(&mut self) -> bool { self.strip_ignores(); self.strip_prefix("{") }
@@ -205,21 +223,22 @@ pub enum ToplevelBlock<'s> {
     ShaderCode(br::ShaderStage, &'s str),
     Varying(br::ShaderStage, br::ShaderStage, Vec<Variable<'s>>),
     SpecConstant(br::ShaderStage, usize, &'s str, &'s str, &'s str),
-    Uniform(br::ShaderStage, usize, usize, &'s str, &'s str)
+    Uniform(br::ShaderStage, usize, usize, &'s str, &'s str),
+    PushConstant(br::ShaderStage, &'s str, &'s str)
 }
 impl<'s> Tokenizer<'s> {
-    pub fn binding_block(&mut self) -> Option<(usize, BindingBlock<'s>)> {
-        let (index, rate) = if let Some(v) = self.binding() { v } else { return None; };
-        if !self.block_start() { return None; }
+    pub fn binding_block(&mut self) -> ParseResult<(usize, BindingBlock<'s>)> {
+        let (index, rate) = self.binding()?;
+        if !self.block_start() { return Err(()); }
         let mut vars = Vec::new();
         while !self.block_end() {
             let idents = self.ident_list();
             if idents.is_empty() { panic!("No declaration found"); }
-            let glsl_type_str = self.glsl_type_ascription().expect("Type required");
+            let glsl_type_str = self.glsl_type_ascription().expect("Type required(binding)");
             vars.extend(idents.into_iter().map(|name| Variable { name, type_str: glsl_type_str }));
             if !self.declaration_end() { panic!("; required at end of each declaration"); }
         }
-        return Some((index, BindingBlock { rate, vars }));
+        return Ok((index, BindingBlock { rate, vars }));
     }
     pub fn vertex_input_block(&mut self) -> Vec<(usize, BindingBlock<'s>)> {
         if !self.block_start() { return Vec::new(); }
@@ -239,7 +258,7 @@ impl<'s> Tokenizer<'s> {
         while !self.block_end() {
             let idents = self.ident_list();
             if idents.is_empty() { panic!("No declaration found"); }
-            let glsl_type_str = self.glsl_type_ascription().expect("Type required");
+            let glsl_type_str = self.glsl_type_ascription().expect("Type required(varying)");
             vars.extend(idents.into_iter().map(|name| Variable { name, type_str: glsl_type_str }));
             if !self.declaration_end() { panic!("; required at end of each declaration"); }
         }
@@ -260,24 +279,31 @@ impl<'s> Tokenizer<'s> {
         let code = self.codeblock().expect("GLSL CodeBlock required");
         return ToplevelBlock::Uniform(stg, set, binding, id, code);
     }
+    pub fn push_constant(&mut self) -> ToplevelBlock<'s> {
+        let stg = self.push_constant_header_rest().expect("ShaderStage is required");
+        let id = self.strip_ignores().strip_ident().expect("Identifier for PushConstant TypeName required");
+        let code = self.codeblock().expect("GLSL CodeBlock required");
+        return ToplevelBlock::PushConstant(stg, id, code);
+    }
 
-    pub fn toplevel_block(&mut self) -> Option<ToplevelBlock<'s>> {
+    pub fn toplevel_block(&mut self) -> ParseResult<ToplevelBlock<'s>> {
         match self.declaration_op() {
-            Some(DeclarationOps::VertexInput) => {
+            Ok(DeclarationOps::VertexInput) => {
                 let vi = self.vertex_input_block();
-                if vi.is_empty() { None } else { ToplevelBlock::VertexInput(vi).into() }
+                if vi.is_empty() { Err(()) } else { Ok(ToplevelBlock::VertexInput(vi)) }
             },
-            Some(DeclarationOps::VertexShader) =>
+            Ok(DeclarationOps::VertexShader) =>
                 self.codeblock().map(|c| ToplevelBlock::ShaderCode(br::ShaderStage::VERTEX, c)),
-            Some(DeclarationOps::FragmentShader) =>
+            Ok(DeclarationOps::FragmentShader) =>
                 self.codeblock().map(|c| ToplevelBlock::ShaderCode(br::ShaderStage::FRAGMENT, c)),
-            Some(DeclarationOps::Varyings) => {
+            Ok(DeclarationOps::Varyings) => {
                 let (src, dst, vars) = self.varying();
-                return ToplevelBlock::Varying(src, dst, vars).into();
+                return Ok(ToplevelBlock::Varying(src, dst, vars));
             },
-            Some(DeclarationOps::SpecConstant) => self.spec_constant().into(),
-            Some(DeclarationOps::Uniform) => self.uniform().into(),
-            _ => None
+            Ok(DeclarationOps::SpecConstant) => Ok(self.spec_constant()),
+            Ok(DeclarationOps::Uniform) => Ok(self.uniform()),
+            Ok(DeclarationOps::PushConstant) => Ok(self.push_constant()),
+            _ => Err(())
         }
     }
 
@@ -298,7 +324,8 @@ pub struct CombinedShader<'s> {
     vertex_shader_code: &'s str, fragment_shader_code: Option<&'s str>,
     varyings_between_shaders: Vec<(br::ShaderStage, br::ShaderStage, Vec<Variable<'s>>)>,
     spec_constants_per_stage: BTreeMap<br::ShaderStage, BTreeMap<usize, (&'s str, GlslType<'s>, &'s str)>>,
-    uniforms_per_stage: BTreeMap<br::ShaderStage, BTreeMap<(usize, usize), (&'s str, &'s str)>>
+    uniforms_per_stage: BTreeMap<br::ShaderStage, BTreeMap<(usize, usize), (&'s str, &'s str)>>,
+    push_constant_per_stage: BTreeMap<br::ShaderStage, (&'s str, &'s str)>
 }
 impl<'s> CombinedShader<'s> {
     pub fn from_parsed_blocks(blocks: Vec<ToplevelBlock<'s>>) -> Self {
@@ -307,7 +334,8 @@ impl<'s> CombinedShader<'s> {
             vertex_shader_code: "", fragment_shader_code: None,
             varyings_between_shaders: Vec::new(),
             spec_constants_per_stage: BTreeMap::new(),
-            uniforms_per_stage: BTreeMap::new()
+            uniforms_per_stage: BTreeMap::new(),
+            push_constant_per_stage: BTreeMap::new()
         };
 
         for tb in blocks {
@@ -332,6 +360,10 @@ impl<'s> CombinedShader<'s> {
                     let storage = cs.uniforms_per_stage.entry(stg).or_insert_with(BTreeMap::new);
                     if storage.contains_key(&(set, binding)) { panic!("Multiple Definitions of Uniform for same (set, binding) in same stage"); }
                     storage.insert((set, binding), (name, init));
+                },
+                ToplevelBlock::PushConstant(stg, name, members) => {
+                    if cs.push_constant_per_stage.contains_key(&stg) { panic!("Multiple Definitions of PushConstants for same shader stage"); }
+                    cs.push_constant_per_stage.insert(stg, (name, members));
                 }
             }
         }
@@ -358,7 +390,7 @@ impl<'s> CombinedShader<'s> {
         if self.vertex_shader_code.contains("RasterPosition") {
             code += "out gl_PerVertex { out vec4 gl_Position; };\n";
         }
-        // 定数(uniformとspecconstant)
+        // 定数(uniformとspecconstantとpushconstant)
         if let Some(cons) = self.spec_constants_per_stage.get(&br::ShaderStage::VERTEX) {
             for (id, &(name, ty, init)) in cons.iter() {
                 code += &format!("layout(constant_id = {}) const {} {} = {};\n", id, ty, name, init);
@@ -368,6 +400,9 @@ impl<'s> CombinedShader<'s> {
             for (&(set, bindings), &(name, cont)) in ufs.iter() {
                 code += &format!("layout(set = {}, binding = {}) uniform {} {{{}}};\n", set, bindings, name, cont);
             }
+        }
+        if let Some(&(name, cb)) = self.push_constant_per_stage.get(&br::ShaderStage::VERTEX) {
+            code += &format!("layout(push_constant) uniform {} {{{}}};\n", name, cb);
         }
         code += "\n";
         // main
@@ -405,6 +440,9 @@ impl<'s> CombinedShader<'s> {
             for (&(set, bindings), &(name, cont)) in ufs.iter() {
                 code += &format!("layout(set = {}, binding = {}) uniform {} {{{}}};\n", set, bindings, name, cont);
             }
+        }
+        if let Some(&(name, cb)) = self.push_constant_per_stage.get(&br::ShaderStage::FRAGMENT) {
+            code += &format!("layout(push_constant) uniform {} {{{}}};\n", name, cb);
         }
         code += "\n";
         // main

@@ -4,7 +4,7 @@ VertexInput {
     Binding 0 [PerVertex] { pos: vec2; uv: vec2; }
 }
 VertexShader {
-    RasterPosition = vec4((pos + offs + chunk_offs) * scale * vec2(1.0, ScreenAspectWH), 0.0, 1.0);
+    RasterPosition = vec4((pos + offs + chunk_offs + render_offset) * scale * vec2(1.0, ScreenAspectWH), 0.0, 1.0);
     uv_v = uv;
 }
 FragmentShader {
@@ -20,7 +20,10 @@ Varyings VertexShader -> FragmentShader {
 
 SpecConstant[VertexShader](0) ScreenAspectWH: float = 1.0;
 SpecConstant[FragmentShader](0) EmbossThickness: float = 0.1;
-Uniform[VertexShader](0, 0) VertexPlacement {
+PushConstant[VertexShader] VertexPlacement {
     vec2 offs, scale;
     vec2 chunk_offs;
+}
+Uniform[VertexShader](0, 0) RenderOffset {
+    vec2 render_offset;
 }
