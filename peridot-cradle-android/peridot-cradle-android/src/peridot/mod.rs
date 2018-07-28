@@ -1,21 +1,20 @@
 #![allow(dead_code)]
 
 use bedrock as br; use bedrock::traits::*;
-#[cfg(not(target_os = "android"))] use appframe::*;
-#[cfg(target_os = "android")] use android::ANativeWindow;
 use std::rc::Rc;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 mod window; use self::window::WindowRenderTargets;
+pub use self::window::{PlatformRenderTarget, SurfaceInfo};
 mod resource; pub use self::resource::*;
 #[cfg(debug_assertions)] mod debug; #[cfg(debug_assertions)] use self::debug::DebugReport;
 
-pub trait EngineEvents<AL: AssetLoader> : Sized {
-    fn init(_e: &Engine<Self, AL>) -> Self;
-    fn update(&self, _e: &Engine<Self, AL>, _on_backbuffer_of: u32) -> br::SubmissionBatch { br::SubmissionBatch::default() }
+pub trait EngineEvents<AL: AssetLoader, PRT: PlatformRenderTarget> : Sized {
+    fn init(_e: &Engine<Self, AL, PRT>) -> Self;
+    fn update(&self, _e: &Engine<Self, AL, PRT>, _on_backbuffer_of: u32) -> br::SubmissionBatch { br::SubmissionBatch::default() }
 }
-impl<AL: AssetLoader> EngineEvents<AL> for () { fn init(_e: &Engine<Self, AL>) -> Self { () } }
+impl<AL: AssetLoader, PRT: PlatformRenderTarget> EngineEvents<AL, PRT> for () { fn init(_e: &Engine<Self, AL, PRT>) -> Self { () } }
 
 use std::io::{Read, Seek, Result as IOResult, BufReader};
 pub trait AssetLoader {
@@ -42,31 +41,22 @@ impl FromAsset for PvpContainer {
     }
 }
 
-pub struct Engine<E: EngineEvents<AL>, AL: AssetLoader> {
-    surface: window::SurfaceInfo, wrt: WindowRenderTargets,
-    pub(self) g: Graphics, event_handler: Option<E>, asset_loader: AL
+mod input; pub use self::input::*;
+
+pub struct Engine<E: EngineEvents<AL, PRT>, AL: AssetLoader, PRT: PlatformRenderTarget> {
+    prt: PRT, surface: SurfaceInfo, wrt: WindowRenderTargets,
+    pub(self) g: Graphics, event_handler: Option<E>, asset_loader: AL, ip: Rc<InputProcess>
 }
-impl<E: EngineEvents<AL>, AL: AssetLoader> Engine<E, AL> {
-    #[cfg(target_os = "android")]
-    pub fn launch_with_android_window(name: &str, version: (u32, u32, u32), window: *mut ANativeWindow, asset_loader: AL)
+impl<E: EngineEvents<AL, PRT>, AL: AssetLoader, PRT: PlatformRenderTarget> Engine<E, AL, PRT> {
+    pub fn launch<IPP: InputProcessPlugin>(name: &str, version: (u32, u32, u32), prt: PRT, asset_loader: AL, ipp: &mut IPP)
             -> br::Result<Self> {
         let g = Graphics::new(name, version)?;
-        let surface = window::SurfaceInfo::new(&g, window)?;
-        let wrt = WindowRenderTargets::new(&g, &surface, window)?;
-        let mut this = Engine { g, surface, wrt, event_handler: None, asset_loader };
+        let surface = prt.create_surface(&g.instance, &g.adapter, g.graphics_queue.family)?;
+        let wrt = WindowRenderTargets::new(&g, &surface, &prt)?;
+        let mut this = Engine { g, surface, wrt, event_handler: None, asset_loader, prt, ip: InputProcess::new().into() };
         let eh = E::init(&this);
         this.event_handler = Some(eh);
-        return Ok(this);
-    }
-    #[cfg(not(target_os = "android"))]
-    pub fn launch_with_window<WE: WindowEventDelegate>(name: &str, version: (u32, u32, u32),
-            server: &GUIApplication<WE::ClientDelegate>, view: &NativeView<WE>, asset_loader: AL) -> br::Result<Self> {
-        let g = Graphics::new(name, version)?;
-        let surface = window::SurfaceInfo::new(server, &g, view)?;
-        let wrt = WindowRenderTargets::new(&g, &surface, view)?;
-        let mut this = Engine { g, surface, wrt, event_handler: None, asset_loader };
-        let eh = E::init(&this);
-        this.event_handler = Some(eh);
+        ipp.on_start_handle(&this.ip);
         return Ok(this);
     }
 
@@ -122,7 +112,7 @@ impl<E: EngineEvents<AL>, AL: AssetLoader> Engine<E, AL> {
         self.event_handler.init(self);
     }
 }*/
-impl<E: EngineEvents<AL>, AL: AssetLoader> Drop for Engine<E, AL> {
+impl<E: EngineEvents<AL, PRT>, AL: AssetLoader, PRT: PlatformRenderTarget> Drop for Engine<E, AL, PRT> {
     fn drop(&mut self) {
         self.graphics().device.wait().unwrap();
     }
@@ -244,22 +234,6 @@ impl Graphics
             }
         }
         return None;
-    }
-
-    #[cfg(not(target_os = "android"))]
-    pub(self) fn presentation_support_on<S: BedrockRenderingServer>(&self, s: &S) -> bool
-    {
-        s.presentation_support(&self.adapter, self.graphics_queue.family)
-    }
-    #[cfg(not(target_os = "android"))]
-    pub(self) fn create_surface_on<S: BedrockRenderingServer, WE: WindowEventDelegate>(&self, s: &S, v: &NativeView<WE>)
-        -> br::Result<br::Surface>
-    {
-        s.create_surface(v, &self.instance)
-    }
-    pub(self) fn surface_support(&self, s: &br::Surface) -> br::Result<bool>
-    {
-        self.adapter.surface_support(self.graphics_queue.family, s)
     }
     
     fn submit_commands<Gen: FnOnce(&mut br::CmdRecord)>(&self, generator: Gen) -> br::Result<()>

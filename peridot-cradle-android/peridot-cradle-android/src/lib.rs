@@ -11,19 +11,53 @@ use std::ptr::null_mut;
 mod peridot;
 mod glib;
 use std::cell::RefCell;
+use std::rc::Rc;
 
-struct MainWindow(RefCell<Option<EngineA>>);
+struct MainWindow {
+    ipp: RefCell<PlatformInputProcessPlugin>, e: RefCell<Option<EngineA>>
+}
 impl MainWindow {
-    fn new() -> Self { MainWindow(RefCell::new(None)) }
+    fn new() -> Self {
+        MainWindow { ipp: PlatformInputProcessPlugin::new().into(), e: RefCell::new(None) }
+    }
     fn init(&self, app: &android::App) {
+        let mut ipp = self.ipp.borrow_mut();
         let amgr = unsafe { android::AssetManager::from_ptr((*app.activity).asset_manager).unwrap() };
-        *self.0.borrow_mut() = peridot::Engine::launch_with_android_window(GameA::NAME, GameA::VERSION,
-            app.window, PlatformAssetLoader::new(amgr)).expect("Failed to initialize the engine").into();
+        *self.e.borrow_mut() = EngineA::launch(GameA::NAME, GameA::VERSION,
+            PlatformWindowHandler(app.window), PlatformAssetLoader::new(amgr), &mut *ipp)
+            .expect("Failed to initialize the engine").into();
     }
     fn render(&self)
     {
-        let mut b = self.0.borrow_mut();
+        let mut b = self.e.borrow_mut();
         if let Some(e) = b.as_mut() { e.do_update(); }
+    }
+}
+
+use bedrock as br;
+struct PlatformWindowHandler(*mut android::ANativeWindow);
+impl peridot::PlatformRenderTarget for PlatformWindowHandler {
+    fn create_surface(&self, vi: &br::Instance, pd: &br::PhysicalDevice, renderer_queue_family: u32)
+            -> br::Result<peridot::SurfaceInfo> {
+        let obj = br::Surface::new_android(vi, self.0)?;
+        if !pd.surface_support(renderer_queue_family, &obj)? { panic!("Vulkan Surface is not supported by this adapter"); }
+        return peridot::SurfaceInfo::gather_info(&pd, obj);
+    }
+    fn current_geometry_extent(&self) -> (usize, usize) {
+        unsafe { ((*self.0).width() as _, (*self.0).height() as _) }
+    }
+}
+
+struct PlatformInputProcessPlugin { processor: Option<Rc<peridot::InputProcess>> }
+impl PlatformInputProcessPlugin {
+    fn new() -> Self {
+        PlatformInputProcessPlugin { processor: None }
+    }
+}
+impl peridot::InputProcessPlugin for PlatformInputProcessPlugin {
+    fn on_start_handle(&mut self, ip: &Rc<peridot::InputProcess>) {
+        self.processor = Some(ip.clone());
+        info!("Started Handling Inputs...");
     }
 }
 
@@ -49,8 +83,8 @@ impl peridot::AssetLoader for PlatformAssetLoader {
         self.amgr.open(path_str.as_ptr(), AASSET_MODE_STREAMING).ok_or(IOError::new(ErrorKind::NotFound, ""))
     }
 }
-type GameA = glib::Game<PlatformAssetLoader>;
-type EngineA = peridot::Engine<GameA, PlatformAssetLoader>;
+type GameA = glib::Game<PlatformAssetLoader, PlatformWindowHandler>;
+type EngineA = peridot::Engine<GameA, PlatformAssetLoader, PlatformWindowHandler>;
 
 #[no_mangle]
 pub extern "C" fn android_main(app: *mut android::App) {

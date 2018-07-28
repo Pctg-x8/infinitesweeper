@@ -1,4 +1,3 @@
-#[cfg(target_os = "android")] use android::ANativeWindow;
 use super::*;
 use bedrock as br;
 
@@ -15,13 +14,6 @@ pub struct SurfaceInfo {
 }
 impl SurfaceInfo
 {
-    #[cfg(target_os = "android")]
-    pub fn new(g: &Graphics, w: *mut ANativeWindow) -> br::Result<Self> {
-        let obj = br::Surface::new_android(&g.instance, w)?;
-        if !g.surface_support(&obj)? { panic!("Vulkan Surface is not supported on this adapter"); }
-        return Self::gather_info(g, obj);
-    }
-
     pub fn gather_info(pd: &br::PhysicalDevice, obj: br::Surface) -> br::Result<Self> {
         let mut fmq = br::FormatQueryPred::new(); fmq.bit(32).components(br::FormatComponents::RGBA).elements(br::ElementType::UNORM);
         let fmt = pd.surface_formats(&obj)?.into_iter().find(|sf| fmq.satisfy(sf.format))

@@ -1,40 +1,28 @@
-#[cfg(not(target_os = "android"))] use appframe::*;
-#[cfg(target_os = "android")] use android::ANativeWindow;
 use super::*;
 use bedrock as br;
 
 use std::mem::{uninitialized, replace, forget};
 
-pub(super) struct SurfaceInfo {
+pub trait PlatformRenderTarget {
+    fn create_surface(&self, vi: &br::Instance, pd: &br::PhysicalDevice, renderer_queue_family: u32) -> br::Result<SurfaceInfo>;
+    fn current_geometry_extent(&self) -> (usize, usize);
+}
+
+pub struct SurfaceInfo {
     obj: br::Surface, fmt: br::vk::VkSurfaceFormatKHR, pres_mode: br::PresentMode,
     available_composite_alpha: br::CompositeAlpha
 }
 impl SurfaceInfo
 {
-    #[cfg(target_os = "android")]
-    pub fn new(g: &Graphics, w: *mut ANativeWindow) -> br::Result<Self> {
-        let obj = br::Surface::new_android(&g.instance, w)?;
-        if !g.surface_support(&obj)? { panic!("Vulkan Surface is not supported on this adapter"); }
-        return Self::gather_info(g, obj);
-    }
-    #[cfg(not(target_os = "android"))]
-    pub fn new<E: EventDelegate, WE: WindowEventDelegate>(s: &GUIApplication<E>, g: &Graphics, w: &NativeView<WE>) -> br::Result<Self>
-    {
-        if !g.presentation_support_on(s) { panic!("Vulkan Presentation is not supported on this platform"); }
-        let obj = g.create_surface_on(s, w)?;
-        if !g.surface_support(&obj)? { panic!("Vulkan Surface is not supported on this adapter"); }
-        return Self::gather_info(g, obj);
-    }
-
-    fn gather_info(g: &Graphics, obj: br::Surface) -> br::Result<Self> {
+    pub fn gather_info(pd: &br::PhysicalDevice, obj: br::Surface) -> br::Result<Self> {
         let mut fmq = br::FormatQueryPred::new(); fmq.bit(32).components(br::FormatComponents::RGBA).elements(br::ElementType::UNORM);
-        let fmt = g.adapter.surface_formats(&obj)?.into_iter().find(|sf| fmq.satisfy(sf.format))
+        let fmt = pd.surface_formats(&obj)?.into_iter().find(|sf| fmq.satisfy(sf.format))
             .expect("No suitable format found");
-        let pres_modes = g.adapter.surface_present_modes(&obj)?;
+        let pres_modes = pd.surface_present_modes(&obj)?;
         let &pres_mode = pres_modes.iter().find(|&&m| m == br::PresentMode::FIFO || m == br::PresentMode::Mailbox)
             .unwrap_or(&pres_modes[0]);
         
-        let caps = g.adapter.surface_capabilities(&obj)?;
+        let caps = pd.surface_capabilities(&obj)?;
         let available_composite_alpha = if (caps.supportedCompositeAlpha & (br::CompositeAlpha::Inherit as u32)) != 0 {
             br::CompositeAlpha::Inherit
         }
@@ -53,41 +41,16 @@ pub(super) struct WindowRenderTargets
 }
 impl WindowRenderTargets
 {
-    #[cfg(target_os = "android")]
-    pub(super) fn new(g: &Graphics, s: &SurfaceInfo, v: *mut ANativeWindow) -> br::Result<Self>
+    pub(super) fn new<PRT: PlatformRenderTarget>(g: &Graphics, s: &SurfaceInfo, prt: &PRT) -> br::Result<Self>
     {
-        let vref = unsafe { &*v };
         let si = g.adapter.surface_capabilities(&s.obj)?;
         let ext = br::Extent2D(
-            if si.currentExtent.width == 0xffff_ffff { vref.width() as _ } else { si.currentExtent.width },
-            if si.currentExtent.height == 0xffff_ffff { vref.height() as _ } else { si.currentExtent.height });
+            if si.currentExtent.width == 0xffff_ffff { prt.current_geometry_extent().0 as _ } else { si.currentExtent.width },
+            if si.currentExtent.height == 0xffff_ffff { prt.current_geometry_extent().1 as _ } else { si.currentExtent.height });
         let buffer_count = 2.max(si.minImageCount).min(si.maxImageCount);
         let chain = br::SwapchainBuilder::new(&s.obj, buffer_count, &s.fmt, &ext, br::ImageUsage::COLOR_ATTACHMENT)
             .present_mode(s.pres_mode)
             .composite_alpha(s.available_composite_alpha).pre_transform(br::SurfaceTransform::Identity)
-            .create(&g.device)?;
-        
-        let isr_c0 = br::ImageSubresourceRange::color(0, 0);
-        let images = chain.get_images()?;
-        let (mut bb, mut command_completions_for_backbuffer) = (Vec::with_capacity(images.len()), Vec::with_capacity(images.len()));
-        for x in images {
-            bb.push(x.create_view(None, None, &Default::default(), &isr_c0)?);
-            command_completions_for_backbuffer.push(StateFence::new(&g.device)?);
-        }
-
-        return Ok(WindowRenderTargets { command_completions_for_backbuffer, bb, chain });
-    }
-    #[cfg(not(target_os = "android"))]
-    pub(super) fn new<WE: WindowEventDelegate>(g: &Graphics, s: &SurfaceInfo, v: &NativeView<WE>) -> br::Result<Self>
-    {
-        let si = g.adapter.surface_capabilities(&s.obj)?;
-        let ext = br::Extent2D(
-            if si.currentExtent.width == 0xffff_ffff { v.width() as _ } else { si.currentExtent.width },
-            if si.currentExtent.height == 0xffff_ffff { v.height() as _ } else { si.currentExtent.height });
-        let buffer_count = 2.max(si.minImageCount).min(si.maxImageCount);
-        let chain = br::SwapchainBuilder::new(&s.obj, buffer_count, &s.fmt, &ext, br::ImageUsage::COLOR_ATTACHMENT)
-            .present_mode(s.pres_mode)
-            .composite_alpha(br::CompositeAlpha::Opaque).pre_transform(br::SurfaceTransform::Identity)
             .create(&g.device)?;
         
         let isr_c0 = br::ImageSubresourceRange::color(0, 0);

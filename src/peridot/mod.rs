@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 
 use bedrock as br; use bedrock::traits::*;
-#[cfg(target_os = "android")] use android::ANativeWindow;
 use std::rc::Rc;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
