@@ -18,4 +18,4 @@ android = { git = "https://github.com/Pctg-x8/android-defs-rs" }
 
 [target.'cfg(windows)'.dependencies.winapi]
 version = "0.3"
-features = ["winuser", "libloaderapi"]
+features = ["winuser", "libloaderapi", "hidusage"]

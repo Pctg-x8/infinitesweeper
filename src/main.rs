@@ -17,12 +17,42 @@ use std::path::PathBuf;
 
 mod glib;
 
+use bedrock as br;
+use winapi::um::{
+    winuser::{
+        PostQuitMessage, DefWindowProcA as DefWindowProc,
+        DispatchMessageA as DispatchMessage, TranslateMessage,
+        PeekMessageA as PeekMessage, AdjustWindowRectEx, CreateWindowExA as CreateWindowEx,
+        RegisterClassExA as RegisterClassEx, WNDCLASSEXA as WNDCLASSEX,
+        GetClientRect, ShowWindow, SW_SHOWNORMAL,
+        WM_QUIT, WM_DESTROY, WM_INPUT, PM_REMOVE, CW_USEDEFAULT, WS_EX_APPWINDOW,
+        WS_OVERLAPPED, WS_SYSMENU, WS_MINIMIZEBOX, WS_BORDER,
+        RAWINPUTDEVICE, RegisterRawInputDevices, RIDEV_INPUTSINK,
+        RAWINPUTHEADER, RAWINPUT, RID_INPUT, GetRawInputData, RIM_TYPEMOUSE
+    },
+    libloaderapi::GetModuleHandleA as GetModuleHandle
+};
+use winapi::shared::{
+    minwindef::{LRESULT, LPARAM, WPARAM, UINT, HINSTANCE},
+    windef::{HWND, RECT},
+    hidusage::{HID_USAGE_PAGE_GENERIC, HID_USAGE_GENERIC_MOUSE}
+};
+
 type GameT = glib::Game<PlatformAssetLoader, RenderTargetWindow>;
 type EngineT = Engine<GameT, PlatformAssetLoader, RenderTargetWindow>;
 
 struct PlatformInputProcessPlugin { processor: Option<Rc<peridot::InputProcess>> }
 impl PlatformInputProcessPlugin {
-    fn new() -> Self {
+    fn new(hw: HWND) -> Self {
+        let rid = [
+            RAWINPUTDEVICE {
+                usUsagePage: HID_USAGE_PAGE_GENERIC,
+                usUsage: HID_USAGE_GENERIC_MOUSE,
+                dwFlags: RIDEV_INPUTSINK,
+                hwndTarget: hw
+            }
+        ];
+        unsafe { RegisterRawInputDevices(rid.as_ptr(), rid.len() as _, std::mem::size_of::<RAWINPUTDEVICE>() as _); }
         PlatformInputProcessPlugin { processor: None }
     }
 }
@@ -62,23 +92,6 @@ impl peridot::AssetLoader for PlatformAssetLoader {
     }
 }
 
-use bedrock as br;
-use winapi::um::{
-    winuser::{
-        PostQuitMessage, DefWindowProcA as DefWindowProc,
-        DispatchMessageA as DispatchMessage, TranslateMessage,
-        PeekMessageA as PeekMessage, AdjustWindowRectEx, CreateWindowExA as CreateWindowEx,
-        RegisterClassExA as RegisterClassEx, WNDCLASSEXA as WNDCLASSEX,
-        GetClientRect, ShowWindow, SW_SHOWNORMAL,
-        WM_QUIT, WM_DESTROY, WM_INPUT, PM_REMOVE, CW_USEDEFAULT, WS_EX_APPWINDOW,
-        WS_OVERLAPPED, WS_SYSMENU, WS_MINIMIZEBOX, WS_BORDER
-    },
-    libloaderapi::GetModuleHandleA as GetModuleHandle
-};
-use winapi::shared::{
-    minwindef::{LRESULT, LPARAM, WPARAM, UINT, HINSTANCE},
-    windef::{HWND, RECT}
-};
 struct RenderTargetWindow { instance: HINSTANCE, handle: HWND }
 impl peridot::PlatformRenderTarget for RenderTargetWindow {
     fn create_surface(&self, vi: &br::Instance, pd: &br::PhysicalDevice, renderer_queue_family: u32)
@@ -120,8 +133,9 @@ fn main() {
     };
     if hw.is_null() { panic!("Unable to create a Window"); }
 
+    let mut ipp = PlatformInputProcessPlugin::new(hw);
+
     let prt = RenderTargetWindow { instance: hinst, handle: hw };
-    let mut ipp = PlatformInputProcessPlugin::new();
     let mut engine = EngineT::launch(GameT::NAME, GameT::VERSION, prt, PlatformAssetLoader::new(), &mut ipp)
         .expect("Failed to initialize the Engine");
     unsafe { ShowWindow(hw, SW_SHOWNORMAL); }
@@ -140,7 +154,20 @@ extern "system" fn window_callback(h: HWND, msg: UINT, wp: WPARAM, lp: LPARAM) -
     match msg {
         WM_DESTROY => unsafe { PostQuitMessage(0); return 0; },
         WM_INPUT => {
-            debug!("PlatformInputMessage: {:08x} {:08x}", wp, lp);
+            let mut ri: RAWINPUT = unsafe { std::mem::uninitialized() };
+            let mut size = std::mem::size_of::<RAWINPUT>() as _;
+            unsafe {
+                GetRawInputData(std::mem::transmute(lp), RID_INPUT, std::mem::transmute(&mut ri), &mut size,
+                    std::mem::size_of::<RAWINPUTHEADER>() as _);
+            }
+
+            match ri.header.dwType {
+                RIM_TYPEMOUSE => unsafe {
+                    debug!("PlatformMouseInputMessage: {} {} {:08b} {:04b}", ri.data.mouse().lLastX, ri.data.mouse().lLastY,
+                        ri.data.mouse().usButtonFlags, ri.data.mouse().usFlags);
+                }
+                t => debug!("PlatformUnknownInputMessage: {}", t)
+            }
             return 0;
         }
         _ => unsafe { DefWindowProc(h, msg, wp, lp) }
