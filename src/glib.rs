@@ -49,20 +49,20 @@ impl ShaderSpecConstants {
 }
 
 #[allow(dead_code)]
-pub struct Game<AL: AssetLoader>
+pub struct Game<AL: AssetLoader, PRT: PlatformRenderTarget>
 {
     rp: br::RenderPass, framebuffers: Vec<br::Framebuffer>,
     framebuffer_commands: CommandBundle, pass_gp: LayoutedPipeline,
     res: MainResources,
-    _p: PhantomData<AL>
+    _p: PhantomData<*const AL, *const PRT>
 }
-impl<AL: AssetLoader> Game<AL> {
+impl<AL: AssetLoader, PRT: PlatformRenderTarget> Game<AL, PRT> {
     pub const NAME: &'static str = "Infinitesweeper";
     pub const VERSION: (u32, u32, u32) = (0, 1, 0);
 }
-impl<AL: AssetLoader> EngineEvents<AL> for Game<AL>
+impl<AL: AssetLoader, PRT: PlatformRenderTarget> EngineEvents<AL, PRT> for Game<AL, PRT>
 {
-    fn init(e: &Engine<Self, AL>) -> Self
+    fn init(e: &Engine<Self, AL, PRT>) -> Self
     {
         info!("Infinite Minesweeper");
         let rp = br::RenderPassBuilder::new()
@@ -133,7 +133,7 @@ impl<AL: AssetLoader> EngineEvents<AL> for Game<AL>
             rp, framebuffers, framebuffer_commands, pass_gp, res, _p: PhantomData
         };
     }
-    fn update(&self, e: &Engine<Self, AL>, on_backbuffer_of: u32) -> br::SubmissionBatch
+    fn update(&self, e: &Engine<Self, AL, PRT>, on_backbuffer_of: u32) -> br::SubmissionBatch
     {
         let bb_index = on_backbuffer_of as usize;
         return br::SubmissionBatch {
@@ -198,7 +198,9 @@ struct MainResources {
     stack: ResourceStack, buffer: Buffer, dsl_u0: br::DescriptorSetLayout, _dpool: br::DescriptorPool, dset_render_offset: br::vk::VkDescriptorSet
 }
 impl MainResources {
-    fn init<AL: AssetLoader>(e: &Engine<Game<AL>, AL>, transfer_batch: &mut TransferBatch, dsu_batch: &mut DescriptorSetUpdateBatch) -> br::Result<Self> {
+    fn init<AL: AssetLoader, PRT: PlatformRenderTarget>(e: &Engine<Game<AL, PRT>, AL, PRT>,
+            transfer_batch: &mut TransferBatch, dsu_batch: &mut DescriptorSetUpdateBatch)
+            -> br::Result<Self> {
         let g = e.graphics();
         let gd = e.graphics_device();
 

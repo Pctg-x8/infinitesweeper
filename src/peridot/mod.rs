@@ -12,11 +12,11 @@ pub use self::window::{PlatformRenderTarget, SurfaceInfo};
 mod resource; pub use self::resource::*;
 #[cfg(debug_assertions)] mod debug; #[cfg(debug_assertions)] use self::debug::DebugReport;
 
-pub trait EngineEvents<AL: AssetLoader> : Sized {
-    fn init(_e: &Engine<Self, AL>) -> Self;
-    fn update(&self, _e: &Engine<Self, AL>, _on_backbuffer_of: u32) -> br::SubmissionBatch { br::SubmissionBatch::default() }
+pub trait EngineEvents<AL: AssetLoader, PRT: PlatformRenderTarget> : Sized {
+    fn init(_e: &Engine<Self, AL, PRT>) -> Self;
+    fn update(&self, _e: &Engine<Self, AL, PRT>, _on_backbuffer_of: u32) -> br::SubmissionBatch { br::SubmissionBatch::default() }
 }
-impl<AL: AssetLoader> EngineEvents<AL> for () { fn init(_e: &Engine<Self, AL>) -> Self { () } }
+impl<AL: AssetLoader, PRT: PlatformRenderTarget> EngineEvents<AL, PRT> for () { fn init(_e: &Engine<Self, AL, PRT>) -> Self { () } }
 
 use std::io::{Read, Seek, Result as IOResult, BufReader};
 pub trait AssetLoader {
