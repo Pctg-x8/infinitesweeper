@@ -63,6 +63,22 @@ impl peridot::AssetLoader for PlatformAssetLoader {
 }
 
 use bedrock as br;
+use winapi::um::{
+    winuser::{
+        PostQuitMessage, DefWindowProcA as DefWindowProc,
+        DispatchMessageA as DispatchMessage, TranslateMessage,
+        PeekMessageA as PeekMessage, AdjustWindowRectEx, CreateWindowExA as CreateWindowEx,
+        RegisterClassExA as RegisterClassEx, WNDCLASSEXA as WNDCLASSEX,
+        GetClientRect,
+        WM_QUIT, WM_DESTROY, WM_INPUT, PM_REMOVE, CW_USEDEFAULT, WS_EX_APPWINDOW,
+        WS_OVERLAPPED, WS_SYSMENU, WS_MINIMIZEBOX, WS_BORDER
+    },
+    libloaderapi::GetModuleHandleA as GetModuleHandle
+};
+use winapi::shared::{
+    minwindef::{LRESULT, LPARAM, WPARAM, UINT, HINSTANCE},
+    windef::{HWND, RECT}
+};
 struct RenderTargetWindow { instance: HINSTANCE, handle: HWND }
 impl peridot::PlatformRenderTarget for RenderTargetWindow {
     fn create_surface(&self, vi: &br::Instance, pd: &br::PhysicalDevice, renderer_queue_family: u32)
@@ -98,7 +114,7 @@ fn main() {
     let hw = unsafe {
         let ws = WS_OVERLAPPED | WS_SYSMENU | WS_BORDER | WS_MINIMIZEBOX;
         let mut cr0 = RECT { left: 0, top: 0, right: 512 * 10 / 16, bottom: 512 };
-        AdjustWindowRectEx(&mut cr0, ws, false, WS_EX_APPWINDOW);
+        AdjustWindowRectEx(&mut cr0, ws, false as _, WS_EX_APPWINDOW);
         CreateWindowEx(WS_EX_APPWINDOW, wce.lpszClassName, init_caption.as_ptr(), ws, CW_USEDEFAULT, CW_USEDEFAULT,
             cr0.right - cr0.left, cr0.bottom - cr0.top, std::ptr::null_mut(), std::ptr::null_mut(), hinst, std::ptr::null_mut())
     };
@@ -106,7 +122,7 @@ fn main() {
 
     let prt = RenderTargetWindow { instance: hinst, handle: hw };
     let mut ipp = PlatformInputProcessPlugin::new();
-    let mut engine = Engine::launch(GameT::NAME, GameT::VERSION, prt, PlatformAssetLoader::new(), &mut ipp)
+    let mut engine = EngineT::launch(GameT::NAME, GameT::VERSION, prt, PlatformAssetLoader::new(), &mut ipp)
         .expect("Failed to initialize the Engine");
     
     'app: loop {

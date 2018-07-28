@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 
 use bedrock as br; use bedrock::traits::*;
-#[cfg(not(target_os = "android"))] use appframe::*;
 #[cfg(target_os = "android")] use android::ANativeWindow;
 use std::rc::Rc;
 use std::borrow::Cow;
@@ -236,22 +235,6 @@ impl Graphics
             }
         }
         return None;
-    }
-
-    #[cfg(not(target_os = "android"))]
-    pub(self) fn presentation_support_on<S: BedrockRenderingServer>(&self, s: &S) -> bool
-    {
-        s.presentation_support(&self.adapter, self.graphics_queue.family)
-    }
-    #[cfg(not(target_os = "android"))]
-    pub(self) fn create_surface_on<S: BedrockRenderingServer, WE: WindowEventDelegate>(&self, s: &S, v: &NativeView<WE>)
-        -> br::Result<br::Surface>
-    {
-        s.create_surface(v, &self.instance)
-    }
-    pub(self) fn surface_support(&self, s: &br::Surface) -> br::Result<bool>
-    {
-        self.adapter.surface_support(self.graphics_queue.family, s)
     }
     
     fn submit_commands<Gen: FnOnce(&mut br::CmdRecord)>(&self, generator: Gen) -> br::Result<()>
