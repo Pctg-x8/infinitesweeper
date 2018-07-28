@@ -8,7 +8,7 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 mod window; use self::window::WindowRenderTargets;
-pub use self::window::PlatformRenderTarget;
+pub use self::window::{PlatformRenderTarget, SurfaceInfo};
 mod resource; pub use self::resource::*;
 #[cfg(debug_assertions)] mod debug; #[cfg(debug_assertions)] use self::debug::DebugReport;
 
@@ -53,7 +53,7 @@ impl<E: EngineEvents<AL>, AL: AssetLoader, PRT: PlatformRenderTarget> Engine<E, 
     pub fn launch<IPP: InputProcessPlugin>(name: &str, version: (u32, u32, u32), prt: PRT, asset_loader: AL, ipp: &mut IPP)
             -> br::Result<Self> {
         let g = Graphics::new(name, version)?;
-        let surface = prt.create_surface(&g.instance)?;
+        let surface = prt.create_surface(&g.instance, g.graphics_queue.family)?;
         let wrt = WindowRenderTargets::new(&g, &surface, &prt)?;
         let mut this = Engine { g, surface, wrt, event_handler: None, asset_loader, prt, ip: InputProcess::new().into() };
         let eh = E::init(&this);

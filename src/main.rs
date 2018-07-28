@@ -1,5 +1,6 @@
 //! peridot-cradle-pc
 
+extern crate winapi;
 extern crate appframe;
 extern crate bedrock;
 extern crate libc;
@@ -19,47 +20,8 @@ use std::path::PathBuf;
 
 mod glib;
 
-type GameT = glib::Game<PlatformAssetLoader>;
-type EngineT = Engine<GameT, PlatformAssetLoader>;
-
-struct App(UnsafeCell<Option<Rc<MainWindow>>>);
-impl EventDelegate for App {
-    fn postinit(&self, server: &Rc<GUIApplication<Self>>) {
-        let w = MainWindow::new(server).expect("Unable to create MainWindow");
-        w.inner_ref().show();
-        unsafe { *self.0.get() = Some(w); }
-    }
-}
-struct MainWindow {
-    server: Weak<GUIApplication<App>>, inner: UnsafeCell<Option<NativeWindow<MainWindow>>>,
-    engine: RefCell<Option<EngineT>>, ipp: RefCell<PlatformInputProcessPlugin>
-}
-impl MainWindow {
-    fn new(server: &Rc<GUIApplication<App>>) -> IOResult<Rc<Self>> {
-        let this = Rc::new(MainWindow {
-            server: Rc::downgrade(server), inner: UnsafeCell::new(None), engine: RefCell::new(None),
-            ipp: PlatformInputProcessPlugin::new().into()
-        });
-        let w = NativeWindowBuilder::new(512 * 10 / 16, 512, GameT::NAME)
-            .resizable(false).create_renderable(server, &this)?;
-        unsafe { *this.inner.get() = Some(w); }
-        return Ok(this);
-    }
-    fn inner_ref(&self) -> &NativeWindow<Self> { unsafe { (*self.inner.get()).as_ref().unwrap() } }
-    #[allow(dead_code)]
-    fn engine_ref(&self) -> Ref<EngineT> { Ref::map(self.engine.borrow(), |r| r.as_ref().unwrap()) }
-    fn engine_mut(&self) -> RefMut<EngineT> { RefMut::map(self.engine.borrow_mut(), |r| r.as_mut().unwrap()) }
-}
-impl WindowEventDelegate for MainWindow {
-    type ClientDelegate = App;
-
-    fn init_view(&self, view: &NativeView<Self>) {
-        let mut ipp = self.ipp.borrow_mut();
-        *self.engine.borrow_mut() = Engine::launch_with_window(GameT::NAME, GameT::VERSION,
-            &self.server.upgrade().unwrap(), view, PlatformAssetLoader::new(), &mut *ipp).expect("Failed to initialize the engine").into();
-    }
-    fn render(&self) { self.engine_mut().do_update(); }
-}
+type GameT = glib::Game<PlatformAssetLoader, RenderTargetWindow>;
+type EngineT = Engine<GameT, PlatformAssetLoader, RenderTargetWindow>;
 
 struct PlatformInputProcessPlugin { processor: Option<Rc<peridot::InputProcess>> }
 impl PlatformInputProcessPlugin {
@@ -103,7 +65,70 @@ impl peridot::AssetLoader for PlatformAssetLoader {
     }
 }
 
+use bedrock as br;
+struct RenderTargetWindow { instance: HINSTANCE, handle: HWND }
+impl peridot::PlatformRenderTarget for RenderTargetWindow {
+    fn create_surface(&self, vi: &br::Instance, pd: &br::PhysicalDevice, renderer_queue_family: u32)
+            -> br::Result<peridot::SurfaceInfo> {
+        if !pd.win32_presentation_support(renderer_queue_family) { panic!("Vulkan Presentation is not supported on this platform"); }
+        let obj = br::Surface::new_win32(vi, self.instance, self.handle)?;
+        if !pd.surface_support(renderer_queue_family, &obj)? { panic!("Vulkan Surface is not supported on this adapter"); }
+        return peridot::SurfaceInfo::gather_info(pd, obj);
+    }
+    fn current_geometry_extent(&self) -> (usize, usize) {
+        let mut r: RECT = unsafe { std::mem::zeroed() };
+        unsafe { GetClientRect(self.handle, &mut r); }
+        return ((r.right - r.left) as _, (r.bottom - r.top) as _);
+    }
+}
+
 fn main() {
     env_logger::init();
-    GUIApplication::run(App(UnsafeCell::new(None)));
+
+    let hinst = unsafe { GetModuleHandle(std::ptr::null()) };
+    let init_caption = std::ffi::CString::from(
+        format!("{} v{}.{}.{}", GameT::NAME, GameT::VERSION.0, GameT::VERSION.1, GameT::VERSION.2)
+    ).unwrap();
+    let wce = WNDCLASSEX {
+        cbSize: std::mem::size_of::<WNDCLASSEX>() as _,
+        lpszClassName: "peridot.RenderTargetWindow".as_ptr() as *const _,
+        lpfnWndProc: Some(window_callback),
+        hInstance: hinst,
+        .. unsafe { std::mem::zeroed() }
+    };
+    let wc = unsafe { RegisterClassEx(&wce) };
+    if wc == 0 { panic!("Unable to register a Window Class"); }
+    let hw = unsafe {
+        let ws = WS_OVERLAPPED | WS_SYSMENU | WS_BORDER | WS_MINIMIZEBOX;
+        let mut cr0 = RECT { left: 0, top: 0, right: 512 * 10 / 16, bottom: 512 };
+        AdjustWindowRectEx(&mut cr0, ws, false, WS_EX_APPWINDOW);
+        CreateWindowEx(WS_EX_APPWINDOW, wce.lpszClassName, init_caption.as_ptr(), ws, CW_USEDEFAULT, CW_USEDEFAULT,
+            cr0.right - cr0.left, cr0.bottom - cr0.top, std::ptr::null_mut(), std::ptr::null_mut(), hinst, std::ptr::null_mut())
+    };
+    if hw.is_null() { panic!("Unable to create a Window"); }
+
+    let prt = RenderTargetWindow { instance: hinst, handle: hw };
+    let mut ipp = PlatformInputProcessPlugin::new();
+    let mut engine = Engine::launch(GameT::NAME, GameT::VERSION, &prt, PlatformAssetLoader::new(), &mut ipp)
+        .expect("Failed to initialize the Engine");
+    
+    'app: loop {
+        let mut msg = unsafe { std::mem::uninitialized() };
+        while unsafe { PeekMessage(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) > 0 } {
+            if msg.message == WM_QUIT { break 'app; }
+            unsafe { TranslateMessage(&mut msg); DispatchMessage(&mut msg); }
+        }
+        engine.do_update();
+    }
+}
+
+extern "system" fn window_callback(h: HWND, msg: UINT, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    match msg {
+        WM_DESTROY => unsafe { PostQuitMessage(0); return 0; },
+        WM_INPUT => {
+            debug!("PlatformInputMessage: {:x08} {:x08}", wp, lp);
+            return 0;
+        }
+        _ => unsafe { DefWindowProc(h, msg, wp, lp) }
+    }
 }

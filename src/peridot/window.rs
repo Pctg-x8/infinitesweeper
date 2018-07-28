@@ -6,7 +6,7 @@ use bedrock as br;
 use std::mem::{uninitialized, replace, forget};
 
 pub trait PlatformRenderTarget {
-    fn create_surface(&self, vi: &br::Instance) -> br::Result<SurfaceInfo>;
+    fn create_surface(&self, vi: &br::Instance, pd: &br::PhysicalDevice, renderer_queue_family: u32) -> br::Result<SurfaceInfo>;
     fn current_geometry_extent(&self) -> (usize, usize);
 }
 
@@ -22,24 +22,16 @@ impl SurfaceInfo
         if !g.surface_support(&obj)? { panic!("Vulkan Surface is not supported on this adapter"); }
         return Self::gather_info(g, obj);
     }
-    #[cfg(not(target_os = "android"))]
-    pub fn new<E: EventDelegate, WE: WindowEventDelegate>(s: &GUIApplication<E>, g: &Graphics, w: &NativeView<WE>) -> br::Result<Self>
-    {
-        if !g.presentation_support_on(s) { panic!("Vulkan Presentation is not supported on this platform"); }
-        let obj = g.create_surface_on(s, w)?;
-        if !g.surface_support(&obj)? { panic!("Vulkan Surface is not supported on this adapter"); }
-        return Self::gather_info(g, obj);
-    }
 
-    fn gather_info(g: &Graphics, obj: br::Surface) -> br::Result<Self> {
+    fn gather_info(pd: &br::PhysicalDevice, obj: br::Surface) -> br::Result<Self> {
         let mut fmq = br::FormatQueryPred::new(); fmq.bit(32).components(br::FormatComponents::RGBA).elements(br::ElementType::UNORM);
-        let fmt = g.adapter.surface_formats(&obj)?.into_iter().find(|sf| fmq.satisfy(sf.format))
+        let fmt = pd.surface_formats(&obj)?.into_iter().find(|sf| fmq.satisfy(sf.format))
             .expect("No suitable format found");
-        let pres_modes = g.adapter.surface_present_modes(&obj)?;
+        let pres_modes = pd.surface_present_modes(&obj)?;
         let &pres_mode = pres_modes.iter().find(|&&m| m == br::PresentMode::FIFO || m == br::PresentMode::Mailbox)
             .unwrap_or(&pres_modes[0]);
         
-        let caps = g.adapter.surface_capabilities(&obj)?;
+        let caps = pd.surface_capabilities(&obj)?;
         let available_composite_alpha = if (caps.supportedCompositeAlpha & (br::CompositeAlpha::Inherit as u32)) != 0 {
             br::CompositeAlpha::Inherit
         }
