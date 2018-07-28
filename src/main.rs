@@ -69,7 +69,7 @@ use winapi::um::{
         DispatchMessageA as DispatchMessage, TranslateMessage,
         PeekMessageA as PeekMessage, AdjustWindowRectEx, CreateWindowExA as CreateWindowEx,
         RegisterClassExA as RegisterClassEx, WNDCLASSEXA as WNDCLASSEX,
-        GetClientRect,
+        GetClientRect, ShowWindow, SW_SHOWNORMAL,
         WM_QUIT, WM_DESTROY, WM_INPUT, PM_REMOVE, CW_USEDEFAULT, WS_EX_APPWINDOW,
         WS_OVERLAPPED, WS_SYSMENU, WS_MINIMIZEBOX, WS_BORDER
     },
@@ -124,6 +124,7 @@ fn main() {
     let mut ipp = PlatformInputProcessPlugin::new();
     let mut engine = EngineT::launch(GameT::NAME, GameT::VERSION, prt, PlatformAssetLoader::new(), &mut ipp)
         .expect("Failed to initialize the Engine");
+    unsafe { ShowWindow(hw, SW_SHOWNORMAL); }
     
     'app: loop {
         let mut msg = unsafe { std::mem::uninitialized() };
