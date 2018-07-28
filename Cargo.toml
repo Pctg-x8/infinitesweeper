@@ -16,3 +16,7 @@ peridot-vertex-processing-pack = { path = "peridot-vertex-processing-pack" }
 
 [target.'cfg(target_os = "android")'.dependencies]
 android = { git = "https://github.com/Pctg-x8/android-defs-rs" }
+
+[target.'cfg(windows)'.dependencies.winapi]
+version = "0.3"
+features = ["winuser"]

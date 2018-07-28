@@ -5,6 +5,11 @@ use bedrock as br;
 
 use std::mem::{uninitialized, replace, forget};
 
+pub trait PlatformRenderTarget {
+    fn create_surface(&self, vi: &br::Instance) -> br::Result<SurfaceInfo>;
+    fn current_geometry_extent(&self) -> (usize, usize);
+}
+
 pub(super) struct SurfaceInfo {
     obj: br::Surface, fmt: br::vk::VkSurfaceFormatKHR, pres_mode: br::PresentMode,
     available_composite_alpha: br::CompositeAlpha
@@ -53,41 +58,16 @@ pub(super) struct WindowRenderTargets
 }
 impl WindowRenderTargets
 {
-    #[cfg(target_os = "android")]
-    pub(super) fn new(g: &Graphics, s: &SurfaceInfo, v: *mut ANativeWindow) -> br::Result<Self>
+    pub(super) fn new<PRT: PlatformRenderTarget>(g: &Graphics, s: &SurfaceInfo, prt: &PRT) -> br::Result<Self>
     {
-        let vref = unsafe { &*v };
         let si = g.adapter.surface_capabilities(&s.obj)?;
         let ext = br::Extent2D(
-            if si.currentExtent.width == 0xffff_ffff { vref.width() as _ } else { si.currentExtent.width },
-            if si.currentExtent.height == 0xffff_ffff { vref.height() as _ } else { si.currentExtent.height });
+            if si.currentExtent.width == 0xffff_ffff { prt.current_geometry_extent().0 as _ } else { si.currentExtent.width },
+            if si.currentExtent.height == 0xffff_ffff { prt.current_geometry_extent().1 as _ } else { si.currentExtent.height });
         let buffer_count = 2.max(si.minImageCount).min(si.maxImageCount);
         let chain = br::SwapchainBuilder::new(&s.obj, buffer_count, &s.fmt, &ext, br::ImageUsage::COLOR_ATTACHMENT)
             .present_mode(s.pres_mode)
             .composite_alpha(s.available_composite_alpha).pre_transform(br::SurfaceTransform::Identity)
-            .create(&g.device)?;
-        
-        let isr_c0 = br::ImageSubresourceRange::color(0, 0);
-        let images = chain.get_images()?;
-        let (mut bb, mut command_completions_for_backbuffer) = (Vec::with_capacity(images.len()), Vec::with_capacity(images.len()));
-        for x in images {
-            bb.push(x.create_view(None, None, &Default::default(), &isr_c0)?);
-            command_completions_for_backbuffer.push(StateFence::new(&g.device)?);
-        }
-
-        return Ok(WindowRenderTargets { command_completions_for_backbuffer, bb, chain });
-    }
-    #[cfg(not(target_os = "android"))]
-    pub(super) fn new<WE: WindowEventDelegate>(g: &Graphics, s: &SurfaceInfo, v: &NativeView<WE>) -> br::Result<Self>
-    {
-        let si = g.adapter.surface_capabilities(&s.obj)?;
-        let ext = br::Extent2D(
-            if si.currentExtent.width == 0xffff_ffff { v.width() as _ } else { si.currentExtent.width },
-            if si.currentExtent.height == 0xffff_ffff { v.height() as _ } else { si.currentExtent.height });
-        let buffer_count = 2.max(si.minImageCount).min(si.maxImageCount);
-        let chain = br::SwapchainBuilder::new(&s.obj, buffer_count, &s.fmt, &ext, br::ImageUsage::COLOR_ATTACHMENT)
-            .present_mode(s.pres_mode)
-            .composite_alpha(br::CompositeAlpha::Opaque).pre_transform(br::SurfaceTransform::Identity)
             .create(&g.device)?;
         
         let isr_c0 = br::ImageSubresourceRange::color(0, 0);

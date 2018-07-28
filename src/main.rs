@@ -32,12 +32,13 @@ impl EventDelegate for App {
 }
 struct MainWindow {
     server: Weak<GUIApplication<App>>, inner: UnsafeCell<Option<NativeWindow<MainWindow>>>,
-    engine: RefCell<Option<EngineT>>
+    engine: RefCell<Option<EngineT>>, ipp: RefCell<PlatformInputProcessPlugin>
 }
 impl MainWindow {
     fn new(server: &Rc<GUIApplication<App>>) -> IOResult<Rc<Self>> {
         let this = Rc::new(MainWindow {
-            server: Rc::downgrade(server), inner: UnsafeCell::new(None), engine: RefCell::new(None)
+            server: Rc::downgrade(server), inner: UnsafeCell::new(None), engine: RefCell::new(None),
+            ipp: PlatformInputProcessPlugin::new().into()
         });
         let w = NativeWindowBuilder::new(512 * 10 / 16, 512, GameT::NAME)
             .resizable(false).create_renderable(server, &this)?;
@@ -53,10 +54,24 @@ impl WindowEventDelegate for MainWindow {
     type ClientDelegate = App;
 
     fn init_view(&self, view: &NativeView<Self>) {
+        let mut ipp = self.ipp.borrow_mut();
         *self.engine.borrow_mut() = Engine::launch_with_window(GameT::NAME, GameT::VERSION,
-            &self.server.upgrade().unwrap(), view, PlatformAssetLoader::new()).expect("Failed to initialize the engine").into();
+            &self.server.upgrade().unwrap(), view, PlatformAssetLoader::new(), &mut *ipp).expect("Failed to initialize the engine").into();
     }
     fn render(&self) { self.engine_mut().do_update(); }
+}
+
+struct PlatformInputProcessPlugin { processor: Option<Rc<peridot::InputProcess>> }
+impl PlatformInputProcessPlugin {
+    fn new() -> Self {
+        PlatformInputProcessPlugin { processor: None }
+    }
+}
+impl peridot::InputProcessPlugin for PlatformInputProcessPlugin {
+    fn on_start_handle(&mut self, ip: &Rc<peridot::InputProcess>) {
+        self.processor = Some(ip.clone());
+        info!("Started Handling Inputs...");
+    }
 }
 
 use std::fs::File;

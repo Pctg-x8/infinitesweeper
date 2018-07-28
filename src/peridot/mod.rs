@@ -8,6 +8,7 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 mod window; use self::window::WindowRenderTargets;
+pub use self::window::PlatformRenderTarget;
 mod resource; pub use self::resource::*;
 #[cfg(debug_assertions)] mod debug; #[cfg(debug_assertions)] use self::debug::DebugReport;
 
@@ -42,31 +43,22 @@ impl FromAsset for PvpContainer {
     }
 }
 
-pub struct Engine<E: EngineEvents<AL>, AL: AssetLoader> {
-    surface: window::SurfaceInfo, wrt: WindowRenderTargets,
-    pub(self) g: Graphics, event_handler: Option<E>, asset_loader: AL
+mod input; pub use self::input::*;
+
+pub struct Engine<E: EngineEvents<AL>, AL: AssetLoader, PRT: PlatformRenderTarget> {
+    prt: PRT, wrt: WindowRenderTargets,
+    pub(self) g: Graphics, event_handler: Option<E>, asset_loader: AL, ip: Rc<InputProcess>
 }
-impl<E: EngineEvents<AL>, AL: AssetLoader> Engine<E, AL> {
-    #[cfg(target_os = "android")]
-    pub fn launch_with_android_window(name: &str, version: (u32, u32, u32), window: *mut ANativeWindow, asset_loader: AL)
+impl<E: EngineEvents<AL>, AL: AssetLoader, PRT: PlatformRenderTarget> Engine<E, AL, PRT> {
+    pub fn launch<IPP: InputProcessPlugin>(name: &str, version: (u32, u32, u32), prt: PRT, asset_loader: AL, ipp: &mut IPP)
             -> br::Result<Self> {
         let g = Graphics::new(name, version)?;
-        let surface = window::SurfaceInfo::new(&g, window)?;
-        let wrt = WindowRenderTargets::new(&g, &surface, window)?;
-        let mut this = Engine { g, surface, wrt, event_handler: None, asset_loader };
+        let surface = prt.create_surface(&g.instance)?;
+        let wrt = WindowRenderTargets::new(&g, &surface, &prt)?;
+        let mut this = Engine { g, surface, wrt, event_handler: None, asset_loader, prt, ip: InputProcess::new().into() };
         let eh = E::init(&this);
         this.event_handler = Some(eh);
-        return Ok(this);
-    }
-    #[cfg(not(target_os = "android"))]
-    pub fn launch_with_window<WE: WindowEventDelegate>(name: &str, version: (u32, u32, u32),
-            server: &GUIApplication<WE::ClientDelegate>, view: &NativeView<WE>, asset_loader: AL) -> br::Result<Self> {
-        let g = Graphics::new(name, version)?;
-        let surface = window::SurfaceInfo::new(server, &g, view)?;
-        let wrt = WindowRenderTargets::new(&g, &surface, view)?;
-        let mut this = Engine { g, surface, wrt, event_handler: None, asset_loader };
-        let eh = E::init(&this);
-        this.event_handler = Some(eh);
+        ipp.on_start_handle(&this.ip);
         return Ok(this);
     }
 
