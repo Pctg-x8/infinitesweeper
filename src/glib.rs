@@ -54,7 +54,7 @@ pub struct Game<AL: AssetLoader, PRT: PlatformRenderTarget>
     rp: br::RenderPass, framebuffers: Vec<br::Framebuffer>,
     framebuffer_commands: CommandBundle, pass_gp: LayoutedPipeline,
     res: MainResources,
-    _p: PhantomData<*const AL, *const PRT>
+    _p: PhantomData<(*const AL, *const PRT)>
 }
 impl<AL: AssetLoader, PRT: PlatformRenderTarget> Game<AL, PRT> {
     pub const NAME: &'static str = "Infinitesweeper";

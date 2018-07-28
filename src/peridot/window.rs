@@ -1,4 +1,3 @@
-#[cfg(not(target_os = "android"))] use appframe::*;
 #[cfg(target_os = "android")] use android::ANativeWindow;
 use super::*;
 use bedrock as br;
@@ -10,7 +9,7 @@ pub trait PlatformRenderTarget {
     fn current_geometry_extent(&self) -> (usize, usize);
 }
 
-pub(super) struct SurfaceInfo {
+pub struct SurfaceInfo {
     obj: br::Surface, fmt: br::vk::VkSurfaceFormatKHR, pres_mode: br::PresentMode,
     available_composite_alpha: br::CompositeAlpha
 }
@@ -23,7 +22,7 @@ impl SurfaceInfo
         return Self::gather_info(g, obj);
     }
 
-    fn gather_info(pd: &br::PhysicalDevice, obj: br::Surface) -> br::Result<Self> {
+    pub fn gather_info(pd: &br::PhysicalDevice, obj: br::Surface) -> br::Result<Self> {
         let mut fmq = br::FormatQueryPred::new(); fmq.bit(32).components(br::FormatComponents::RGBA).elements(br::ElementType::UNORM);
         let fmt = pd.surface_formats(&obj)?.into_iter().find(|sf| fmq.satisfy(sf.format))
             .expect("No suitable format found");

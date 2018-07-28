@@ -1,7 +1,6 @@
 //! peridot-cradle-pc
 
 extern crate winapi;
-extern crate appframe;
 extern crate bedrock;
 extern crate libc;
 #[macro_use] extern crate log;
@@ -11,9 +10,7 @@ extern crate peridot_vertex_processing_pack;
 extern crate env_logger;
 mod peridot;
 
-use appframe::*;
-use std::rc::{Rc, Weak};
-use std::cell::{UnsafeCell, RefCell, Ref, RefMut};
+use std::rc::Rc;
 use peridot::Engine;
 use std::io::Result as IOResult;
 use std::path::PathBuf;
@@ -86,7 +83,7 @@ fn main() {
     env_logger::init();
 
     let hinst = unsafe { GetModuleHandle(std::ptr::null()) };
-    let init_caption = std::ffi::CString::from(
+    let init_caption = std::ffi::CString::new(
         format!("{} v{}.{}.{}", GameT::NAME, GameT::VERSION.0, GameT::VERSION.1, GameT::VERSION.2)
     ).unwrap();
     let wce = WNDCLASSEX {
@@ -109,7 +106,7 @@ fn main() {
 
     let prt = RenderTargetWindow { instance: hinst, handle: hw };
     let mut ipp = PlatformInputProcessPlugin::new();
-    let mut engine = Engine::launch(GameT::NAME, GameT::VERSION, &prt, PlatformAssetLoader::new(), &mut ipp)
+    let mut engine = Engine::launch(GameT::NAME, GameT::VERSION, prt, PlatformAssetLoader::new(), &mut ipp)
         .expect("Failed to initialize the Engine");
     
     'app: loop {
@@ -126,7 +123,7 @@ extern "system" fn window_callback(h: HWND, msg: UINT, wp: WPARAM, lp: LPARAM) -
     match msg {
         WM_DESTROY => unsafe { PostQuitMessage(0); return 0; },
         WM_INPUT => {
-            debug!("PlatformInputMessage: {:x08} {:x08}", wp, lp);
+            debug!("PlatformInputMessage: {:08x} {:08x}", wp, lp);
             return 0;
         }
         _ => unsafe { DefWindowProc(h, msg, wp, lp) }

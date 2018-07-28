@@ -45,15 +45,15 @@ impl FromAsset for PvpContainer {
 
 mod input; pub use self::input::*;
 
-pub struct Engine<E: EngineEvents<AL>, AL: AssetLoader, PRT: PlatformRenderTarget> {
-    prt: PRT, wrt: WindowRenderTargets,
+pub struct Engine<E: EngineEvents<AL, PRT>, AL: AssetLoader, PRT: PlatformRenderTarget> {
+    prt: PRT, surface: SurfaceInfo, wrt: WindowRenderTargets,
     pub(self) g: Graphics, event_handler: Option<E>, asset_loader: AL, ip: Rc<InputProcess>
 }
-impl<E: EngineEvents<AL>, AL: AssetLoader, PRT: PlatformRenderTarget> Engine<E, AL, PRT> {
+impl<E: EngineEvents<AL, PRT>, AL: AssetLoader, PRT: PlatformRenderTarget> Engine<E, AL, PRT> {
     pub fn launch<IPP: InputProcessPlugin>(name: &str, version: (u32, u32, u32), prt: PRT, asset_loader: AL, ipp: &mut IPP)
             -> br::Result<Self> {
         let g = Graphics::new(name, version)?;
-        let surface = prt.create_surface(&g.instance, g.graphics_queue.family)?;
+        let surface = prt.create_surface(&g.instance, &g.adapter, g.graphics_queue.family)?;
         let wrt = WindowRenderTargets::new(&g, &surface, &prt)?;
         let mut this = Engine { g, surface, wrt, event_handler: None, asset_loader, prt, ip: InputProcess::new().into() };
         let eh = E::init(&this);
@@ -114,7 +114,7 @@ impl<E: EngineEvents<AL>, AL: AssetLoader, PRT: PlatformRenderTarget> Engine<E, 
         self.event_handler.init(self);
     }
 }*/
-impl<E: EngineEvents<AL>, AL: AssetLoader> Drop for Engine<E, AL> {
+impl<E: EngineEvents<AL, PRT>, AL: AssetLoader, PRT: PlatformRenderTarget> Drop for Engine<E, AL, PRT> {
     fn drop(&mut self) {
         self.graphics().device.wait().unwrap();
     }
