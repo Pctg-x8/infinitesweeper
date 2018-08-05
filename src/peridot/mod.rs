@@ -52,8 +52,10 @@ impl<E: EngineEvents<AL, PRT>, AL: AssetLoader, PRT: PlatformRenderTarget> Engin
             -> br::Result<Self> {
         let g = Graphics::new(name, version)?;
         let surface = prt.create_surface(&g.instance, &g.adapter, g.graphics_queue.family)?;
+        trace!("Creating WindowRenderTargets...");
         let wrt = WindowRenderTargets::new(&g, &surface, &prt)?;
         let mut this = Engine { g, surface, wrt, event_handler: None, asset_loader, prt, ip: InputProcess::new().into() };
+        trace!("Initializing Game...");
         let eh = E::init(&this);
         this.event_handler = Some(eh);
         ipp.on_start_handle(&this.ip);
@@ -72,6 +74,7 @@ impl<E: EngineEvents<AL, PRT>, AL: AssetLoader, PRT: PlatformRenderTarget> Engin
     pub fn graphics_queue_family_index(&self) -> u32 { self.g.graphics_queue.family }
     pub fn backbuffer_format(&self) -> br::vk::VkFormat { self.surface.format() }
     pub fn backbuffers(&self) -> &[br::ImageView] { self.wrt.backbuffers() }
+    pub fn input(&self) -> &InputProcess { &self.ip }
     
     pub fn submit_commands<Gen: FnOnce(&mut br::CmdRecord)>(&self, generator: Gen) -> br::Result<()> {
         self.g.submit_commands(generator)
@@ -87,6 +90,7 @@ impl<E: EngineEvents<AL, PRT>, AL: AssetLoader, PRT: PlatformRenderTarget> Engin
             .expect("Acquiring available backbuffer index");
         self.wrt.command_completion_for_backbuffer_mut(bb_index as _)
             .wait().expect("Waiting Previous command completion");
+        self.ip.prepare_for_frame();
         {
             let mut fb_submission = self.event_handler_ref().update(self, bb_index);
             fb_submission.signal_semaphores.to_mut().push(&self.g.present_ordering);

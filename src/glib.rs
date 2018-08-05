@@ -60,8 +60,7 @@ impl<AL: AssetLoader, PRT: PlatformRenderTarget> Game<AL, PRT> {
     pub const NAME: &'static str = "Infinitesweeper";
     pub const VERSION: (u32, u32, u32) = (0, 1, 0);
 }
-impl<AL: AssetLoader, PRT: PlatformRenderTarget> EngineEvents<AL, PRT> for Game<AL, PRT>
-{
+impl<AL: AssetLoader, PRT: PlatformRenderTarget> EngineEvents<AL, PRT> for Game<AL, PRT> {
     fn init(e: &Engine<Self, AL, PRT>) -> Self
     {
         info!("Infinite Minesweeper");
@@ -135,6 +134,7 @@ impl<AL: AssetLoader, PRT: PlatformRenderTarget> EngineEvents<AL, PRT> for Game<
     }
     fn update(&self, e: &Engine<Self, AL, PRT>, on_backbuffer_of: u32) -> br::SubmissionBatch
     {
+        trace!("LeftButton: {}", e.input().mouse_button(0));
         let bb_index = on_backbuffer_of as usize;
         return br::SubmissionBatch {
             command_buffers: Cow::from(self.framebuffer_commands[bb_index..bb_index+1].to_owned()),

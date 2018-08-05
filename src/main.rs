@@ -28,7 +28,8 @@ use winapi::um::{
         WM_QUIT, WM_DESTROY, WM_INPUT, PM_REMOVE, CW_USEDEFAULT, WS_EX_APPWINDOW,
         WS_OVERLAPPED, WS_SYSMENU, WS_MINIMIZEBOX, WS_BORDER,
         RAWINPUTDEVICE, RegisterRawInputDevices, RIDEV_INPUTSINK,
-        RAWINPUTHEADER, RAWINPUT, RID_INPUT, GetRawInputData, RIM_TYPEMOUSE
+        RAWINPUTHEADER, RAWINPUT, RID_INPUT, GetRawInputData, RIM_TYPEMOUSE,
+        GetFocus
     },
     libloaderapi::GetModuleHandleA as GetModuleHandle
 };
@@ -43,7 +44,8 @@ type EngineT = Engine<GameT, PlatformAssetLoader, RenderTargetWindow>;
 
 struct PlatformInputProcessPlugin { processor: Option<Rc<peridot::InputProcess>> }
 impl PlatformInputProcessPlugin {
-    fn new(hw: HWND) -> Self {
+    fn new() -> Self { PlatformInputProcessPlugin { processor: None } }
+    fn register_rawinput(hw: HWND) {
         let rid = [
             RAWINPUTDEVICE {
                 usUsagePage: HID_USAGE_PAGE_GENERIC,
@@ -53,7 +55,6 @@ impl PlatformInputProcessPlugin {
             }
         ];
         unsafe { RegisterRawInputDevices(rid.as_ptr(), rid.len() as _, std::mem::size_of::<RAWINPUTDEVICE>() as _); }
-        PlatformInputProcessPlugin { processor: None }
     }
 }
 impl peridot::InputProcessPlugin for PlatformInputProcessPlugin {
@@ -108,8 +109,12 @@ impl peridot::PlatformRenderTarget for RenderTargetWindow {
     }
 }
 
+static mut IPP: *mut PlatformInputProcessPlugin = 0 as _;
 fn main() {
     env_logger::init();
+
+    let mut ipp = PlatformInputProcessPlugin::new();
+    unsafe { IPP = &mut ipp as *mut _; }
 
     let hinst = unsafe { GetModuleHandle(std::ptr::null()) };
     let init_caption = std::ffi::CString::new(
@@ -132,8 +137,7 @@ fn main() {
             cr0.right - cr0.left, cr0.bottom - cr0.top, std::ptr::null_mut(), std::ptr::null_mut(), hinst, std::ptr::null_mut())
     };
     if hw.is_null() { panic!("Unable to create a Window"); }
-
-    let mut ipp = PlatformInputProcessPlugin::new(hw);
+    PlatformInputProcessPlugin::register_rawinput(hw);
 
     let prt = RenderTargetWindow { instance: hinst, handle: hw };
     let mut engine = EngineT::launch(GameT::NAME, GameT::VERSION, prt, PlatformAssetLoader::new(), &mut ipp)
@@ -154,6 +158,8 @@ extern "system" fn window_callback(h: HWND, msg: UINT, wp: WPARAM, lp: LPARAM) -
     match msg {
         WM_DESTROY => unsafe { PostQuitMessage(0); return 0; },
         WM_INPUT => {
+            if unsafe { GetFocus() != h } { return 0; }
+
             let mut ri: RAWINPUT = unsafe { std::mem::uninitialized() };
             let mut size = std::mem::size_of::<RAWINPUT>() as _;
             unsafe {
@@ -163,8 +169,29 @@ extern "system" fn window_callback(h: HWND, msg: UINT, wp: WPARAM, lp: LPARAM) -
 
             match ri.header.dwType {
                 RIM_TYPEMOUSE => unsafe {
-                    debug!("PlatformMouseInputMessage: {} {} {:08b} {:04b}", ri.data.mouse().lLastX, ri.data.mouse().lLastY,
-                        ri.data.mouse().usButtonFlags, ri.data.mouse().usFlags);
+                    let m = ri.data.mouse();
+                    if let Some(ref p) = (*IPP).processor {
+                        if (m.usButtonFlags & 0x0400) != 0 {
+                            p.dispatch_message(peridot::MouseInputMessage::Wheel(
+                                std::mem::transmute::<_, i16>(m.usButtonData) as _));
+                        }
+                        for n in 0 .. 5 {
+                            if (m.usButtonFlags & (0x01 << (n * 2))) != 0 {
+                                p.dispatch_message(peridot::MouseInputMessage::ButtonDown(n))
+                            }
+                            if (m.usButtonFlags & (0x02 << (n * 2))) != 0 {
+                                p.dispatch_message(peridot::MouseInputMessage::ButtonUp(n))
+                            }
+                        }
+                        if m.lLastX != 0 || m.lLastY != 0 {
+                            if (m.usFlags & 0x01) != 0 {
+                                warn!("Absolute Motion does not support: {}, {}", m.lLastX, m.lLastY);
+                            }
+                            else {
+                                p.dispatch_message(peridot::MouseInputMessage::MoveRel(m.lLastX as _, m.lLastY as _));
+                            }
+                        }
+                    }
                 }
                 t => debug!("PlatformUnknownInputMessage: {}", t)
             }
