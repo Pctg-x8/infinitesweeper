@@ -12,7 +12,10 @@ mod resource; pub use self::resource::*;
 
 pub trait EngineEvents<AL: AssetLoader, PRT: PlatformRenderTarget> : Sized {
     fn init(_e: &Engine<Self, AL, PRT>) -> Self;
-    fn update(&self, _e: &Engine<Self, AL, PRT>, _on_backbuffer_of: u32) -> br::SubmissionBatch { br::SubmissionBatch::default() }
+    /// Updates the game and passes copying(optional) and rendering command batches to the engine.
+    fn update(&self, _e: &Engine<Self, AL, PRT>, _on_backbuffer_of: u32) -> (Option<br::SubmissionBatch>, br::SubmissionBatch) {
+        (None, br::SubmissionBatch::default())
+    }
 }
 impl<AL: AssetLoader, PRT: PlatformRenderTarget> EngineEvents<AL, PRT> for () { fn init(_e: &Engine<Self, AL, PRT>) -> Self { () } }
 
@@ -72,6 +75,8 @@ impl<E: EngineEvents<AL, PRT>, AL: AssetLoader, PRT: PlatformRenderTarget> Engin
     pub fn graphics(&self) -> &Graphics { &self.g }
     pub fn graphics_device(&self) -> &br::Device { &self.g.device }
     pub fn graphics_queue_family_index(&self) -> u32 { self.g.graphics_queue.family }
+    // 将来的に分かれるかも？
+    pub fn transfer_queue_family_index(&self) -> u32 { self.g.graphics_queue.family }
     pub fn backbuffer_format(&self) -> br::vk::VkFormat { self.surface.format() }
     pub fn backbuffers(&self) -> &[br::ImageView] { self.wrt.backbuffers() }
     pub fn input(&self) -> &InputProcess { &self.ip }
@@ -92,11 +97,24 @@ impl<E: EngineEvents<AL, PRT>, AL: AssetLoader, PRT: PlatformRenderTarget> Engin
             .wait().expect("Waiting Previous command completion");
         self.ip.prepare_for_frame();
         {
-            let mut fb_submission = self.event_handler_ref().update(self, bb_index);
-            fb_submission.signal_semaphores.to_mut().push(&self.g.present_ordering);
-            fb_submission.wait_semaphores.to_mut().push((&self.g.acquiring_backbuffer, br::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT));
-            self.submit_buffered_commands(&[fb_submission], self.wrt.command_completion_for_backbuffer(bb_index as _).object())
-                .expect("CommandBuffer Submission");
+            let (copy_submission, mut fb_submission) = self.event_handler_ref().update(self, bb_index);
+            if let Some(mut cs) = copy_submission {
+                // copy -> render
+                cs.signal_semaphores.to_mut().push(&self.g.buffer_ready);
+                fb_submission.wait_semaphores.to_mut().extend(vec![
+                    (&self.g.acquiring_backbuffer, br::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT),
+                    (&self.g.buffer_ready, br::PipelineStageFlags::VERTEX_SHADER)]);
+                fb_submission.signal_semaphores.to_mut().push(&self.g.present_ordering);
+                self.submit_buffered_commands(&[cs, fb_submission], self.wrt.command_completion_for_backbuffer(bb_index as _).object())
+                    .expect("CommandBuffer Submission");
+            }
+            else {
+                // render only(old logic)
+                fb_submission.signal_semaphores.to_mut().push(&self.g.present_ordering);
+                fb_submission.wait_semaphores.to_mut().push((&self.g.acquiring_backbuffer, br::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT));
+                self.submit_buffered_commands(&[fb_submission], self.wrt.command_completion_for_backbuffer(bb_index as _).object())
+                    .expect("CommandBuffer Submission");
+            }
         }
         unsafe {
             self.wrt.command_completion_for_backbuffer_mut(bb_index as _).signal();
@@ -148,7 +166,7 @@ pub struct Graphics
     graphics_queue: Queue,
     #[cfg(debug_assertions)] _d: DebugReport,
     cp_onetime_submit: br::CommandPool,
-    acquiring_backbuffer: br::Semaphore, present_ordering: br::Semaphore,
+    acquiring_backbuffer: br::Semaphore, present_ordering: br::Semaphore, buffer_ready: br::Semaphore,
     memory_type_index_cache: RefCell<BTreeMap<(u32, u32), u32>>
 }
 impl Graphics
@@ -191,6 +209,7 @@ impl Graphics
         
         return Ok(Graphics
         {
+            buffer_ready: br::Semaphore::new(&device)?,
             present_ordering: br::Semaphore::new(&device)?,
             acquiring_backbuffer: br::Semaphore::new(&device)?,
             cp_onetime_submit: br::CommandPool::new(&device, gqf_index, true, false)?,
@@ -263,6 +282,8 @@ impl<'p> Drop for LocalCommandBundle<'p>
     fn drop(&mut self) { self.1.free(&self.0[..]); }
 }
 
+#[derive(Clone, Copy, Debug, Ord, PartialOrd, Eq, PartialEq, Hash)]
+pub enum CBSubmissionType { Graphics, Transfer }
 pub struct CommandBundle(Vec<br::CommandBuffer>, br::CommandPool);
 impl ::std::ops::Deref for CommandBundle
 {
@@ -275,11 +296,16 @@ impl Drop for CommandBundle
 }
 impl CommandBundle
 {
-    pub fn new(d: &br::Device, queue_family_index: u32, count: usize) -> br::Result<Self>
+    pub fn new(g: &Graphics, submission_type: CBSubmissionType, count: usize) -> br::Result<Self>
     {
-        let cp = br::CommandPool::new(d, queue_family_index, false, false)?;
+        let qf = match submission_type {
+            CBSubmissionType::Graphics => g.graphics_queue.family,
+            CBSubmissionType::Transfer => g.graphics_queue.family
+        };
+        let cp = br::CommandPool::new(&g.device, qf, false, false)?;
         return Ok(CommandBundle(cp.alloc(count as _, true)?, cp));
     }
+    pub fn reset(&self) -> br::Result<()> { self.1.reset(true) }
 }
 
 pub enum SubpassDependencyTemplates {}
@@ -404,6 +430,7 @@ impl TransferBatch {
         self.ready_barriers.entry(dest_stage).or_insert_with(ReadyResourceBarriers::new)
             .buffer.push((res.clone(), byterange, access_grants));
     }
+    pub fn is_empty(&self) -> bool { self.copy_buffers.is_empty() }
     
     fn update_barrier_range_for(map: &mut BTreeMap<ResourceKey<Buffer>, Range<u64>>, k: ResourceKey<Buffer>, new_range: Range<u64>) {
         let r = map.entry(k).or_insert_with(|| new_range.clone());

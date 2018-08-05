@@ -12,6 +12,7 @@ use std::borrow::Cow;
 use peridot_vertex_processing_pack::*;
 use std::rc::Rc;
 use std::marker::PhantomData;
+use std::cell::RefCell;
 
 // fn main() { env_logger::init(); Game::launch(); }
 
@@ -53,7 +54,7 @@ pub struct Game<AL: AssetLoader, PRT: PlatformRenderTarget>
 {
     rp: br::RenderPass, framebuffers: Vec<br::Framebuffer>,
     framebuffer_commands: CommandBundle, pass_gp: LayoutedPipeline,
-    res: MainResources,
+    res: MainResources, update_commands: Vec<CommandBundle>, render_offset: RefCell<[f32; 2]>,
     _p: PhantomData<(*const AL, *const PRT)>
 }
 impl<AL: AssetLoader, PRT: PlatformRenderTarget> Game<AL, PRT> {
@@ -112,7 +113,7 @@ impl<AL: AssetLoader, PRT: PlatformRenderTarget> EngineEvents<AL, PRT> for Game<
             .create(&e.graphics_device(), None).unwrap();
         let pass_gp = LayoutedPipeline::combine(pass_gp, &u0_layout);
 
-        let framebuffer_commands = CommandBundle::new(&e.graphics_device(), e.graphics_queue_family_index(), framebuffers.len())
+        let framebuffer_commands = CommandBundle::new(&e.graphics(), CBSubmissionType::Graphics, framebuffers.len())
             .expect("Framebuffer CommandBundle");
         for (fb, cb) in framebuffers.iter().zip(framebuffer_commands.iter())
         {
@@ -127,19 +128,57 @@ impl<AL: AssetLoader, PRT: PlatformRenderTarget> EngineEvents<AL, PRT> for Game<
             }
             rec.end_render_pass();
         }
+        let mut update_commands = Vec::with_capacity(framebuffers.len());
+        for n in 0 .. framebuffers.len() {
+            update_commands.push(CommandBundle::new(&e.graphics(), CBSubmissionType::Transfer, 1)
+                .expect("Updating CommandBundle"));
+        }
+        /*{
+            let _ = update_commands[0].begin().expect("Beginning Recording commands");
+        }*/
 
         return Game {
-            rp, framebuffers, framebuffer_commands, pass_gp, res, _p: PhantomData
+            rp, framebuffers, framebuffer_commands, update_commands, pass_gp, res, _p: PhantomData,
+            render_offset: [0.0; 2].into()
         };
     }
-    fn update(&self, e: &Engine<Self, AL, PRT>, on_backbuffer_of: u32) -> br::SubmissionBatch
-    {
-        trace!("LeftButton: {}", e.input().mouse_button(0));
+    fn update(&self, e: &Engine<Self, AL, PRT>, on_backbuffer_of: u32) -> (Option<br::SubmissionBatch>, br::SubmissionBatch) {
+        let mut tfb = TransferBatch::new();
+        self.res.update_pfsbuffer(|m| unsafe {
+            if e.input().plane_touching() {
+                let md = e.input().plane_delta_move();
+                if md.0 != 0 || md.1 != 0 {
+                    self.render_offset.borrow_mut()[0] += 0.125 * 0.5 * md.0 as f32;
+                    self.render_offset.borrow_mut()[1] += 0.125 * 0.5 * md.1 as f32;
+                    m.get_mut::<[f32; 2]>(self.res.pfsstack.render_offset_ub).copy_from_slice(&self.render_offset.borrow()[..]);
+                    tfb.add_copying_buffer((&self.res.pfsbuffer, self.res.pfsstack.render_offset_ub as _),
+                        (&self.res.buffer, self.res.stack.render_offset_ub as _), size_of::<[f32; 2]>() as _);
+                    tfb.add_buffer_graphics_ready(br::PipelineStageFlags::VERTEX_SHADER, &self.res.buffer,
+                        self.res.stack.render_offset_ub as _ .. (self.res.stack.render_offset_ub + size_of::<[f32; 2]>()) as _,
+                        br::AccessFlags::UNIFORM_READ);
+                }
+            }
+        }).unwrap();
+
         let bb_index = on_backbuffer_of as usize;
-        return br::SubmissionBatch {
-            command_buffers: Cow::from(self.framebuffer_commands[bb_index..bb_index+1].to_owned()),
-            .. Default::default()
-        };
+        if !tfb.is_empty() {
+            self.update_commands[bb_index].reset().unwrap();
+            let mut rec = self.update_commands[bb_index][0].begin().expect("Updating UpdateCB");
+            tfb.sink_transfer_commands(&mut rec);
+            tfb.sink_graphics_ready_commands(&mut rec);
+            return (Some(br::SubmissionBatch {
+                command_buffers: Cow::Borrowed(&self.update_commands[bb_index]), .. Default::default()
+            }), br::SubmissionBatch {
+                command_buffers: Cow::Borrowed(&self.framebuffer_commands[bb_index..bb_index+1]),
+                .. Default::default()
+            });
+        }
+        else {
+            return (None, br::SubmissionBatch {
+                command_buffers: Cow::Borrowed(&self.framebuffer_commands[bb_index..bb_index+1]),
+                .. Default::default()
+            });
+        }
     }
 }
 
@@ -155,6 +194,18 @@ static VPUD: &[VertexPlacementUniformData] = &[
     VertexPlacementUniformData { offs: [0.0, 0.0], scale: [0.125, 0.125], chunk_offs: [-16.0, -16.0] }
 ];
 
+pub struct PerFrameStagingResourceStack {
+    render_offset_ub: usize,
+    total_size: usize
+}
+impl PerFrameStagingResourceStack {
+    pub fn init(bp: &mut BufferPrealloc) -> Self {
+        PerFrameStagingResourceStack {
+            render_offset_ub: bp.add(BufferContent::uniform::<[f32; 2]>()),
+            total_size: bp.total_size()
+        }
+    }
+}
 pub struct ResourceStack {
     chunked_rects_vb: usize, chunked_rects_ib: usize, render_offset_ub: usize
 }
@@ -195,7 +246,8 @@ impl ResourceStack {
     }
 }
 struct MainResources {
-    stack: ResourceStack, buffer: Buffer, dsl_u0: br::DescriptorSetLayout, _dpool: br::DescriptorPool, dset_render_offset: br::vk::VkDescriptorSet
+    stack: ResourceStack, buffer: Buffer, dsl_u0: br::DescriptorSetLayout, _dpool: br::DescriptorPool, dset_render_offset: br::vk::VkDescriptorSet,
+    pfsstack: PerFrameStagingResourceStack, pfsbuffer: Buffer
 }
 impl MainResources {
     fn init<AL: AssetLoader, PRT: PlatformRenderTarget>(e: &Engine<Game<AL, PRT>, AL, PRT>,
@@ -203,6 +255,10 @@ impl MainResources {
             -> br::Result<Self> {
         let g = e.graphics();
         let gd = e.graphics_device();
+
+        let mut bp = BufferPrealloc::new(&g);
+        let pfsstack = PerFrameStagingResourceStack::init(&mut bp);
+        let pfsbuffer = MemoryBadget::new(&g).alloc_with_buffer_host_visible(bp.build_upload()?)?;
 
         let mut bp = BufferPrealloc::new(&g);
         let rs = ResourceStack::init(&mut bp);
@@ -220,6 +276,9 @@ impl MainResources {
         transfer_batch.add_mirroring_buffer(&buffer_upload, &buffer, 0, bp.total_size() as _);
         dsu_batch.write(dset_render_offset, 0,
             br::DescriptorUpdateInfo::UniformBuffer(vec![(buffer.native_ptr(), rs.render_offset_ub .. bp.total_size())]));
-        return Ok(MainResources { stack: rs, buffer, dsl_u0, _dpool: dpool, dset_render_offset });
+        return Ok(MainResources { stack: rs, buffer, dsl_u0, _dpool: dpool, dset_render_offset, pfsstack, pfsbuffer });
+    }
+    fn update_pfsbuffer<F: FnMut(&br::MappedMemoryRange)>(&self, updater: F) -> br::Result<()> {
+        self.pfsbuffer.guard_map(self.pfsstack.total_size, updater)
     }
 }

@@ -12,7 +12,9 @@ struct FrameData {
     mouse_motion_x: isize, mouse_motion_y: isize, mouse_wheel_motion: isize, mouse_pressing: [bool; MAX_MOUSE_BUTTONS],
     mouse_down_inframe: [bool; MAX_MOUSE_BUTTONS], mouse_up_inframe: [bool; MAX_MOUSE_BUTTONS]
 }
-pub struct InputProcess { collected: RefCell<AsyncCollectedData>, frame: RefCell<FrameData> }
+pub struct InputProcess {
+    collected: RefCell<AsyncCollectedData>, frame: RefCell<FrameData>
+}
 pub trait InputProcessPlugin {
     fn on_start_handle(&mut self, processor: &Rc<InputProcess>);
 }
@@ -40,6 +42,17 @@ impl InputProcess {
             fd.mouse_down_inframe[n] = !fd.mouse_pressing[n] && cd.mouse_button[n];
             fd.mouse_pressing[n] = cd.mouse_button[n];
         }
+    }
+
+    // Mouse/Touch integrated apis
+    pub fn plane_touch(&self) -> bool {
+        self.frame.borrow().mouse_down_inframe[0]
+    }
+    pub fn plane_touching(&self) -> bool {
+        self.frame.borrow().mouse_pressing[0]
+    }
+    pub fn plane_delta_move(&self) -> (isize, isize) {
+        (self.frame.borrow().mouse_motion_x, self.frame.borrow().mouse_motion_y)
     }
 
     pub fn mouse_down(&self, knum: usize) -> bool {
