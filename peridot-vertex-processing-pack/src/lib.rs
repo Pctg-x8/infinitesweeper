@@ -1,6 +1,7 @@
 //! Vertex Processing Stage Container
 
 extern crate bedrock;
+extern crate peridot_serialization_utils; use peridot_serialization_utils::*;
 
 use bedrock as br;
 use std::io::{Write, BufRead, Seek, SeekFrom, Result as IOResult, Error as IOError, ErrorKind, Cursor};
@@ -162,43 +163,5 @@ impl BinarySerializeVkStructures for Vec<u8> {
         let VariableUInt(element_count) = VariableUInt::read(source)?;
         let mut buf = vec![0u8; element_count as usize];
         source.read_exact(&mut buf).map(|_| buf)
-    }
-}
-
-/// octet variadic unsigned integer
-struct VariableUInt(u32);
-impl VariableUInt {
-    fn write<W: Write>(&self, writer: &mut W) -> IOResult<()> {
-        let buf = Self::decompose_rec(self.0, Vec::new());
-        writer.write(&buf).map(drop)
-    }
-    // u32 to aparted octets
-    fn decompose_rec(n: u32, mut sink: Vec<u8>) -> Vec<u8> {
-        let n7 = (n & 0x7f) as u8;
-        let nr = n >> 7;
-        sink.push(n7 | if nr != 0 { 0x80 } else { 0 });
-        if nr != 0 { Self::decompose_rec(nr, sink) } else { sink }
-    }
-    fn read<R: BufRead>(reader: &mut R) -> IOResult<Self> {
-        let (mut v, mut shifts) = (0u32, 0usize);
-        loop {
-            let (consumed, done) = {
-                let mut available = match reader.fill_buf() {
-                    Ok(v) => v,
-                    Err(e) => if e.kind() == ErrorKind::Interrupted { continue; } else { return Err(e); }
-                };
-                let (mut consumed, mut done) = (0, false);
-                while !available.is_empty() {
-                    v |= ((available[0] & 0x7f) as u32) << shifts;
-                    shifts += 7;
-                    consumed += 1;
-                    if (available[0] & 0x80) == 0 { done = true; break; }
-                    available = &available[1..];
-                }
-                (consumed, done)
-            };
-            reader.consume(consumed);
-            if done { return Ok(VariableUInt(v)); }
-        }
     }
 }
