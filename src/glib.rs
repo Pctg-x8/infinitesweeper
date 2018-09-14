@@ -12,7 +12,6 @@ use std::borrow::Cow;
 use peridot_vertex_processing_pack::*;
 use std::rc::Rc;
 use std::marker::PhantomData;
-use std::cell::RefCell;
 
 // fn main() { env_logger::init(); Game::launch(); }
 
@@ -54,7 +53,8 @@ pub struct Game<AL: AssetLoader, PRT: PlatformRenderTarget>
 {
     rp: br::RenderPass, framebuffers: Vec<br::Framebuffer>,
     framebuffer_commands: CommandBundle, pass_gp: LayoutedPipeline,
-    res: MainResources, update_commands: Vec<CommandBundle>, render_offset: RefCell<[f32; 2]>,
+    res: MainResources, update_commands: Vec<CommandBundle>, render_offset: [f32; 2],
+    drag_vec: (f32, f32),
     _p: PhantomData<(*const AL, *const PRT)>
 }
 impl<AL: AssetLoader, PRT: PlatformRenderTarget> Game<AL, PRT> {
@@ -64,7 +64,8 @@ impl<AL: AssetLoader, PRT: PlatformRenderTarget> Game<AL, PRT> {
 impl<AL: AssetLoader, PRT: PlatformRenderTarget> EngineEvents<AL, PRT> for Game<AL, PRT> {
     fn init(e: &Engine<Self, AL, PRT>) -> Self
     {
-        info!("Infinite Minesweeper");
+        let render_area = e.backbuffers()[0].size();
+        info!("Infinite Minesweeper: {}x{}", render_area.0, render_area.1);
         let rp = br::RenderPassBuilder::new()
             .add_attachment(br::AttachmentDescription::new(e.backbuffer_format(), br::ImageLayout::PresentSrc, br::ImageLayout::PresentSrc)
                 .load_op(br::LoadOp::Clear).store_op(br::StoreOp::Store))
@@ -73,7 +74,7 @@ impl<AL: AssetLoader, PRT: PlatformRenderTarget> EngineEvents<AL, PRT> for Game<
             .create(&e.graphics_device()).expect("RenderPass");
         let framebuffers: Vec<_> = e.backbuffers().iter()
             .map(|v| br::Framebuffer::new(&rp, &[v], v.size(), 1).expect("Framebuffer")).collect();
-        let framebuffer_size: br::vk::VkRect2D = br::Extent2D::clone(e.backbuffers()[0].size().as_ref()).into();
+        let framebuffer_size: br::vk::VkRect2D = br::Extent2D::clone(render_area.as_ref()).into();
         let filling_viewport = br::vk::VkViewport {
             x: framebuffer_size.offset.x as _, y: framebuffer_size.offset.y as _,
             width: framebuffer_size.extent.width as _, height: framebuffer_size.extent.height as _,
@@ -137,22 +138,33 @@ impl<AL: AssetLoader, PRT: PlatformRenderTarget> EngineEvents<AL, PRT> for Game<
 
         return Game {
             rp, framebuffers, framebuffer_commands, update_commands, pass_gp, res, _p: PhantomData,
-            render_offset: [0.0; 2].into()
+            render_offset: [0.0; 2], drag_vec: (0.0, 0.0)
         };
     }
-    fn update(&self, e: &Engine<Self, AL, PRT>, on_backbuffer_of: u32) -> (Option<br::SubmissionBatch>, br::SubmissionBatch) {
+    fn update(&mut self, e: &Engine<Self, AL, PRT>, on_backbuffer_of: u32) -> (Option<br::SubmissionBatch>, br::SubmissionBatch) {
+        const DRAG: f32 = 0.9;
+        const THRES: f32 = 0.01;
+        let render_area = e.backbuffers()[0].size();
         let mut tfb = TransferBatch::new();
-        self.res.update_pfsbuffer(|m| unsafe {
-            if e.input().plane_touching() {
-                let md = e.input().plane_delta_move();
-                if md.0 != 0 || md.1 != 0 {
-                    self.render_offset.borrow_mut()[0] += 0.125 * md.0 as f32;
-                    self.render_offset.borrow_mut()[1] += 0.125 * md.1 as f32;
-                    m.get_mut::<[f32; 2]>(self.res.pfsstack.render_offset_ub).copy_from_slice(&self.render_offset.borrow()[..]);
-                    self.res.pfsstack.commit_render_offset_changes(&self.res.buffer, self.res.stack.render_offset_ub as _, &mut tfb);
-                }
-            }
-        }).unwrap();
+
+        if e.input().plane_touching() {
+            let md = e.input().plane_delta_move();
+            self.drag_vec = (16.0 * md.0 as f32 / render_area.0 as f32, 16.0 * md.1 as f32 / render_area.0 as f32);
+        }
+        else {
+            self.drag_vec = (self.drag_vec.0 * DRAG, self.drag_vec.1 * DRAG);
+        }
+        self.render_offset[0] += self.drag_vec.0; self.render_offset[1] += self.drag_vec.1;
+        let (a, b) = AsRef::<br::Extent2D>::as_ref(render_area).pixel_perfect_in_normalized(self.render_offset[0], self.render_offset[1]);
+        self.render_offset[0] = a; self.render_offset[1] = b;
+
+        if self.drag_vec.0.abs() >= THRES || self.drag_vec.1.abs() >= THRES {
+            self.res.update_pfsbuffer(|m| unsafe {
+                // update
+                m.get_mut::<[f32; 2]>(self.res.pfsstack.render_offset_ub).copy_from_slice(&self.render_offset[..]);
+                self.res.pfsstack.commit_render_offset_changes(&self.res.buffer, self.res.stack.render_offset_ub as _, &mut tfb);
+            }).unwrap();
+        }
 
         let bb_index = on_backbuffer_of as usize;
         if !tfb.is_empty() {
