@@ -1,5 +1,8 @@
 #![allow(dead_code)]
 
+// extern crate font_kit;
+extern crate pathfinder_partitioner;
+
 use bedrock as br; use bedrock::traits::*;
 use std::rc::Rc;
 use std::borrow::Cow;
@@ -9,11 +12,12 @@ mod window; use self::window::WindowRenderTargets;
 pub use self::window::{PlatformRenderTarget, SurfaceInfo};
 mod resource; pub use self::resource::*;
 #[cfg(debug_assertions)] mod debug; #[cfg(debug_assertions)] use self::debug::DebugReport;
+pub mod utils; pub use self::utils::*;
 
 pub trait EngineEvents<AL: AssetLoader, PRT: PlatformRenderTarget> : Sized {
     fn init(_e: &Engine<Self, AL, PRT>) -> Self;
     /// Updates the game and passes copying(optional) and rendering command batches to the engine.
-    fn update(&self, _e: &Engine<Self, AL, PRT>, _on_backbuffer_of: u32) -> (Option<br::SubmissionBatch>, br::SubmissionBatch) {
+    fn update(&mut self, _e: &Engine<Self, AL, PRT>, _on_backbuffer_of: u32) -> (Option<br::SubmissionBatch>, br::SubmissionBatch) {
         (None, br::SubmissionBatch::default())
     }
 }
@@ -48,7 +52,7 @@ mod input; pub use self::input::*;
 
 pub struct Engine<E: EngineEvents<AL, PRT>, AL: AssetLoader, PRT: PlatformRenderTarget> {
     prt: PRT, surface: SurfaceInfo, wrt: WindowRenderTargets,
-    pub(self) g: Graphics, event_handler: Option<E>, asset_loader: AL, ip: Rc<InputProcess>
+    pub(self) g: Graphics, event_handler: Option<RefCell<E>>, asset_loader: AL, ip: Rc<InputProcess>
 }
 impl<E: EngineEvents<AL, PRT>, AL: AssetLoader, PRT: PlatformRenderTarget> Engine<E, AL, PRT> {
     pub fn launch<IPP: InputProcessPlugin>(name: &str, version: (u32, u32, u32), prt: PRT, asset_loader: AL, ipp: &mut IPP)
@@ -60,7 +64,7 @@ impl<E: EngineEvents<AL, PRT>, AL: AssetLoader, PRT: PlatformRenderTarget> Engin
         let mut this = Engine { g, surface, wrt, event_handler: None, asset_loader, prt, ip: InputProcess::new().into() };
         trace!("Initializing Game...");
         let eh = E::init(&this);
-        this.event_handler = Some(eh);
+        this.event_handler = Some(eh.into());
         ipp.on_start_handle(&this.ip);
         return Ok(this);
     }
@@ -88,7 +92,6 @@ impl<E: EngineEvents<AL, PRT>, AL: AssetLoader, PRT: PlatformRenderTarget> Engin
         self.g.graphics_queue.q.submit(batches, Some(fence))
     }
 
-    pub fn event_handler_ref(&self) -> &E { self.event_handler.as_ref().expect("<EMPTY EVENTHANDLER>") }
     pub fn do_update(&mut self)
     {
         let bb_index = self.wrt.acquire_next_backbuffer_index(None, br::CompletionHandler::Device(&self.g.acquiring_backbuffer))
@@ -97,7 +100,8 @@ impl<E: EngineEvents<AL, PRT>, AL: AssetLoader, PRT: PlatformRenderTarget> Engin
             .wait().expect("Waiting Previous command completion");
         self.ip.prepare_for_frame();
         {
-            let (copy_submission, mut fb_submission) = self.event_handler_ref().update(self, bb_index);
+            let mut eh_mut = self.event_handler.as_ref().unwrap().borrow_mut();
+            let (copy_submission, mut fb_submission) = eh_mut.update(self, bb_index);
             if let Some(mut cs) = copy_submission {
                 // copy -> render
                 cs.signal_semaphores.to_mut().push(&self.g.buffer_ready);
