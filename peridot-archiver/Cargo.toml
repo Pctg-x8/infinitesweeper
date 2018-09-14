@@ -1,0 +1,9 @@
+[package]
+name = "peridot-archiver"
+version = "0.1.0"
+authors = ["S.Percentage <Syn.Tri.Naga@gmail.com>"]
+
+[dependencies]
+clap = "2.32"
+glob = "0.2"
+peridot-serialization-utils = { path = "../peridot-serialization-utils" }
