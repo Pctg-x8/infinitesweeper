@@ -1,10 +1,11 @@
 use std::io::prelude::{BufRead, Write};
-use std::io::{Result as IOResult, ErrorKind};
+use std::io::{Result as IOResult, Error as IOError, ErrorKind};
+use std::str::from_utf8;
 
 /// octet variadic unsigned integer
-struct VariableUInt(u32);
+pub struct VariableUInt(pub u32);
 impl VariableUInt {
-    fn write<W: Write>(&self, writer: &mut W) -> IOResult<()> {
+    pub fn write<W: Write>(&self, writer: &mut W) -> IOResult<()> {
         Self::iter_fragment(self.0, |v| writer.write(&[v]).map(drop))
     }
     /// u32 to break apart into bytes, and calls closure with fragment
@@ -13,7 +14,7 @@ impl VariableUInt {
         callback(n7 | if nr != 0 { 0x80 } else { 0 })?;
         if nr != 0 { Self::iter_fragment(nr, callback) } else { Ok(()) }
     }
-    fn read<R: BufRead>(reader: &mut R) -> IOResult<Self> {
+    pub fn read<R: BufRead>(reader: &mut R) -> IOResult<Self> {
         let (mut v, mut shifts) = (0u32, 0usize);
         loop {
             let (consumed, done) = {
@@ -34,5 +35,26 @@ impl VariableUInt {
             reader.consume(consumed);
             if done { return Ok(VariableUInt(v)); }
         }
+    }
+}
+
+/// a utf-8 string representation leading its byte length as `VariableUInt`.
+pub struct PascalString(pub String);
+pub struct PascalStr<'s>(pub &'s str);
+impl PascalString {
+    pub fn write<W: Write>(&self, writer: &mut W) -> IOResult<()> {
+        PascalStr(&self.0).write(writer)
+    }
+    pub fn read<R: BufRead>(reader: &mut R) -> IOResult<Self> {
+        let VariableUInt(bytelength) = VariableUInt::read(reader)?;
+        let mut bytes = Vec::with_capacity(bytelength as _); unsafe { bytes.set_len(bytelength as _); }
+        reader.read_exact(&mut bytes).map(drop)?;
+        return from_utf8(&bytes[..]).map(|s| PascalString(s.to_owned())).map_err(|e| IOError::new(ErrorKind::Other, e));
+    }
+}
+impl<'s> PascalStr<'s> {
+    pub fn write<W: Write>(&self, writer: &mut W) -> IOResult<()> {
+        VariableUInt(self.0.as_bytes().len() as _).write(writer)
+            .and_then(|_| writer.write(self.0.as_bytes())).map(drop)
     }
 }
