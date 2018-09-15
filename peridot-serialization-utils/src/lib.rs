@@ -56,6 +56,6 @@ impl PascalString {
 impl<'s> PascalStr<'s> {
     pub fn write<W: Write>(&self, writer: &mut W) -> IOResult<usize> {
         VariableUInt(self.0.as_bytes().len() as _).write(writer)
-            .and_then(|wl| writer.write_all(self.0.as_bytes()).map(move |_| wl + self.0.as_bytes().len() as _))
+            .and_then(|wl| writer.write_all(self.0.as_bytes()).map(move |_| wl + self.0.as_bytes().len()))
     }
 }
