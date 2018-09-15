@@ -5,8 +5,9 @@ use std::str::from_utf8;
 /// octet variadic unsigned integer
 pub struct VariableUInt(pub u32);
 impl VariableUInt {
-    pub fn write<W: Write>(&self, writer: &mut W) -> IOResult<()> {
-        Self::iter_fragment(self.0, |v| writer.write(&[v]).map(drop))
+    pub fn write<W: Write>(&self, writer: &mut W) -> IOResult<usize> {
+        let mut iteration_count = 0;
+        Self::iter_fragment(self.0, |v| { iteration_count += 1; writer.write_all(&[v]) }).map(|_| iteration_count)
     }
     /// u32 to break apart into bytes, and calls closure with fragment
     fn iter_fragment<CB: FnMut(u8) -> IOResult<()>>(v: u32, mut callback: CB) -> IOResult<()> {
@@ -42,7 +43,7 @@ impl VariableUInt {
 pub struct PascalString(pub String);
 pub struct PascalStr<'s>(pub &'s str);
 impl PascalString {
-    pub fn write<W: Write>(&self, writer: &mut W) -> IOResult<()> {
+    pub fn write<W: Write>(&self, writer: &mut W) -> IOResult<usize> {
         PascalStr(&self.0).write(writer)
     }
     pub fn read<R: BufRead>(reader: &mut R) -> IOResult<Self> {
@@ -53,8 +54,8 @@ impl PascalString {
     }
 }
 impl<'s> PascalStr<'s> {
-    pub fn write<W: Write>(&self, writer: &mut W) -> IOResult<()> {
+    pub fn write<W: Write>(&self, writer: &mut W) -> IOResult<usize> {
         VariableUInt(self.0.as_bytes().len() as _).write(writer)
-            .and_then(|_| writer.write(self.0.as_bytes())).map(drop)
+            .and_then(|wl| writer.write_all(self.0.as_bytes()).map(move |_| wl + self.0.as_bytes().len() as _))
     }
 }
