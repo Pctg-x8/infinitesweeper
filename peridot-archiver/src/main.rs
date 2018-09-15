@@ -18,7 +18,13 @@ fn main() {
             Box::new(glob::glob(f).unwrap().flat_map(|f| extract_directory(&f.unwrap())))
         }
         else { extract_directory(Path::new(f)) });
-    let mut archive = par::ArchiveWrite::new(par::CompressionMethod::None);
+    let compression_method = matches.value_of("cmethod").map(|s| match s {
+        "lz4" => par::CompressionMethod::Lz4(0),
+        "zlib" => par::CompressionMethod::Zlib(0),
+        "zstd11" => par::CompressionMethod::Zstd11(0),
+        _ => unreachable!()
+    }).unwrap_or(par::CompressionMethod::None);
+    let mut archive = par::ArchiveWrite::new(compression_method);
     for f in directory_walker {
         println!("input <<= {}", f.display());
         let fstr = f.to_str().unwrap();
