@@ -123,7 +123,7 @@ impl ArchiveRead {
         });
     }
 
-    pub fn get(&mut self, path: &str) -> IOResult<Option<Vec<u8>>> {
+    pub fn read_bin(&mut self, path: &str) -> IOResult<Option<Vec<u8>>> {
         if let Some(entry_pair) = self.entries.get(path) {
             self.content.seek(SeekFrom::Start(self.content_baseptr + entry_pair.relative_offset))?;
             let mut sink = Vec::with_capacity(entry_pair.byte_length as _);
@@ -139,7 +139,7 @@ fn extract(args: &ArgMatches) {
     let mut archive = ArchiveRead::from_file(args.value_of("arc").unwrap(), args.is_present("check")).unwrap();
 
     if let Some(apath) = args.value_of("apath") {
-        if let Some(b) = archive.get(apath).unwrap() {
+        if let Some(b) = archive.read_bin(apath).unwrap() {
             let foptr = unsafe { libc::fdopen(libc::dup(1), "wb\x00".as_ptr() as *const _) };
             NativeOfstream::from_stream_ptr(foptr).unwrap().write_all(&b[..]).unwrap();
         }
