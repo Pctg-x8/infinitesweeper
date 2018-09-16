@@ -4,3 +4,4 @@
 **/*.rs.bk
 **/*.lib
 **/*.pvp
+.DS_Store

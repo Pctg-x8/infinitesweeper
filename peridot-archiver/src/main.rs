@@ -2,11 +2,12 @@
 extern crate peridot_serialization_utils;
 extern crate clap; extern crate glob; mod par; extern crate libc;
 extern crate crc; extern crate lz4; extern crate libflate; extern crate zstd;
-use clap::{App, Arg};
+use clap::{App, Arg, ArgMatches};
 use std::fs::{metadata, read_dir, read, File};
 use std::io::{BufReader, Cursor, SeekFrom};
 use std::io::prelude::{Read, Write, BufRead, Seek};
 use std::io::Result as IOResult;
+use std::collections::HashMap;
 
 pub enum WhereArchive { OnMemory(Vec<u8>), FromIO(BufReader<File>) }
 impl WhereArchive {
@@ -68,83 +69,121 @@ impl Seek for EitherArchiveReader {
     }
 }
 
-#[cfg(feature = "read")]
-fn main() {
-    let matcher = App::new("peridot-archiver:read").version("0.1").author("S.Percentage <Syn.Tri.Naga@gmail.com>")
-        .arg(Arg::with_name("arc").value_name("FILE").required(true).help("Archive file"))
-        .arg(Arg::with_name("apath").value_name("ASSET_PATH").help("An Asset Path (Optional)"))
-        .arg(Arg::with_name("check").long("check-integrity").help("Checks an archive integrity by checksum"));
-    let matches = matcher.get_matches();
-
-    let mut fi = File::open(matches.value_of("arc").unwrap()).map(BufReader::new).unwrap();
-    let (comp, crc) = par::read_file_header(&mut fi).unwrap();
-    println!("Compression Method: {:?}", comp);
-    println!("Checksum: 0x{:08x}", crc);
-    let mut body = WhereArchive::FromIO(fi);
-    if matches.is_present("check") {
-        std::io::stdout().write_all(b"Checking archive integrity...").unwrap();
-        std::io::stdout().flush().unwrap();
-        let input_crc = crc::crc32::checksum_ieee(&body.on_memory().unwrap()[..]);
-        if input_crc != crc {
-            panic!("Checking Integrity Failed: Mismatching CRC-32: input=0x{:08x}", input_crc);
+pub struct ArchiveRead {
+    entries: HashMap<String, par::AssetEntryHeadingPair>, content: EitherArchiveReader,
+    content_baseptr: u64
+}
+impl ArchiveRead {
+    pub fn from_file<P: AsRef<Path>>(path: P, check_integrity: bool) -> IOResult<Self> {
+        let mut fi = File::open(path).map(BufReader::new).unwrap();
+        let (comp, crc) = par::read_file_header(&mut fi).unwrap();
+        // println!("Compression Method: {:?}", comp);
+        // println!("Checksum: 0x{:08x}", crc);
+        let mut body = WhereArchive::FromIO(fi);
+        if check_integrity {
+            // std::io::stdout().write_all(b"Checking archive integrity...").unwrap();
+            // std::io::stdout().flush().unwrap();
+            let input_crc = crc::crc32::checksum_ieee(&body.on_memory().unwrap()[..]);
+            if input_crc != crc {
+                panic!("Checking Integrity Failed: Mismatching CRC-32: input=0x{:08x}", input_crc);
+            }
+            // println!(" ok");
         }
-        println!(" ok");
-    }
-    match comp {
-        par::CompressionMethod::Lz4(ub) => {
-            let mut sink = Vec::with_capacity(ub as _);
-            let mut decoder = lz4::Decoder::new(EitherArchiveReader::new(body)).unwrap();
-            decoder.read_to_end(&mut sink).unwrap();
-            body = WhereArchive::OnMemory(sink);
-        },
-        par::CompressionMethod::Zlib(ub) => {
-            let mut sink = Vec::with_capacity(ub as _);
-            let mut reader = EitherArchiveReader::new(body);
-            let mut decoder = libflate::deflate::Decoder::new(reader);
-            decoder.read_to_end(&mut sink).unwrap();
-            body = WhereArchive::OnMemory(sink);
-        },
-        par::CompressionMethod::Zstd11(ub) => {
-            let mut sink = Vec::with_capacity(ub as _);
-            let mut decoder = zstd::Decoder::new(EitherArchiveReader::new(body)).unwrap();
-            decoder.read_to_end(&mut sink).unwrap();
-            body = WhereArchive::OnMemory(sink);
-        },
-        _ => ()
-    }
-    let mut areader = EitherArchiveReader::new(body);
-    let entries = par::read_asset_entries(&mut areader).unwrap();
-    println!("{:?}", entries);
-    let content_basepointer = areader.seek(SeekFrom::Current(0)).unwrap();
+        match comp {
+            par::CompressionMethod::Lz4(ub) => {
+                let mut sink = Vec::with_capacity(ub as _);
+                let mut decoder = lz4::Decoder::new(EitherArchiveReader::new(body)).unwrap();
+                decoder.read_to_end(&mut sink).unwrap();
+                body = WhereArchive::OnMemory(sink);
+            },
+            par::CompressionMethod::Zlib(ub) => {
+                let mut sink = Vec::with_capacity(ub as _);
+                let mut reader = EitherArchiveReader::new(body);
+                let mut decoder = libflate::deflate::Decoder::new(reader);
+                decoder.read_to_end(&mut sink).unwrap();
+                body = WhereArchive::OnMemory(sink);
+            },
+            par::CompressionMethod::Zstd11(ub) => {
+                let mut sink = Vec::with_capacity(ub as _);
+                let mut decoder = zstd::Decoder::new(EitherArchiveReader::new(body)).unwrap();
+                decoder.read_to_end(&mut sink).unwrap();
+                body = WhereArchive::OnMemory(sink);
+            },
+            _ => ()
+        }
+        let mut areader = EitherArchiveReader::new(body);
+        let entries = par::read_asset_entries(&mut areader).unwrap();
+        /*for (n, d) in &entries {
+            println!("- {}: {} {}", n, d.relative_offset, d.byte_length);
+        }*/
+        let content_baseptr = areader.seek(SeekFrom::Current(0)).unwrap();
 
-    if let Some(apath) = matches.value_of("apath") {
-        if let Some(entry_pair) = entries.get(apath) {
-            let newptr = areader.seek(SeekFrom::Start(content_basepointer + entry_pair.relative_offset)).unwrap();
+        return Ok(ArchiveRead {
+            entries, content: areader, content_baseptr
+        });
+    }
+
+    pub fn get(&mut self, path: &str) -> IOResult<Option<Vec<u8>>> {
+        if let Some(entry_pair) = self.entries.get(path) {
+            self.content.seek(SeekFrom::Start(self.content_baseptr + entry_pair.relative_offset))?;
             let mut sink = Vec::with_capacity(entry_pair.byte_length as _);
             unsafe { sink.set_len(entry_pair.byte_length as _); }
-            areader.read_exact(&mut sink).unwrap();
-            println!("{:?}", sink);
+            self.content.read_exact(&mut sink)?;
+            return Ok(Some(sink));
+        }
+        else { return Ok(None); }
+    }
+}
+
+fn extract(args: &ArgMatches) {
+    let mut archive = ArchiveRead::from_file(args.value_of("arc").unwrap(), args.is_present("check")).unwrap();
+
+    if let Some(apath) = args.value_of("apath") {
+        if let Some(b) = archive.get(apath).unwrap() {
+            let foptr = unsafe { libc::fdopen(libc::dup(1), "wb\x00".as_ptr() as *const _) };
+            NativeOfstream::from_stream_ptr(foptr).unwrap().write_all(&b[..]).unwrap();
         }
         else {
             panic!("Entry not found in archive: {}", apath);
         }
     }
 }
-#[cfg(not(feature = "read"))]
+fn list(args: &ArgMatches) {
+    let archive = ArchiveRead::from_file(args.value_of("arc").unwrap(), args.is_present("check")).unwrap();
+
+    for (n, d) in &archive.entries {
+        println!("{}: {} {}", n, d.relative_offset, d.byte_length);
+    }
+}
 fn main() {
-    let matcher = App::new("peridot-archiver").version("0.1").author("S.Percentage <Syn.Tri.Naga@gmail.com>")
+    let extract_matcher = App::new("extract").version("0.1").author("S.Percentage <Syn.Tri.Naga@gmail.com>")
+        .arg(Arg::with_name("arc").value_name("FILE").required(true).help("Archive file"))
+        .arg(Arg::with_name("apath").value_name("ASSET_PATH").help("An Asset Path (Optional)"))
+        .arg(Arg::with_name("check").long("check-integrity").help("Checks an archive integrity by checksum"));
+    let ls_matcher = App::new("list").version("0.1").author("S.Percentage <Syn.Tri.Naga@gmail.com>")
+        .arg(Arg::with_name("arc").value_name("FILE").required(true).help("Archive file"))
+        .arg(Arg::with_name("check").long("check-integrity").help("Checks an archive integrity by checksum"));
+    let create_matcher = App::new("new").version("0.1").author("S.Percentage <Syn.Tri.Naga@gmail.com>")
         .arg(Arg::with_name("ofile").short("o").long("output").value_name("FILE").help("Describes where archive file will be written"))
         .arg(Arg::with_name("ifiled").help("Input File/Directory").required(true).multiple(true))
         .arg(Arg::with_name("cmethod").short("c").long("compress").value_name("METHOD")
             .possible_values(&["lz4", "zlib", "zstd11"]).takes_value(true).help("Describes the compression method"));
+    let matcher = App::new("peridot-archive").version("0.1").author("S.Percentage <Syn.Tri.Naga@gmail.com>")
+        .subcommands(vec![extract_matcher, create_matcher, ls_matcher]);
     let matches = matcher.get_matches();
 
-    let directory_walker = matches.values_of("ifiled").unwrap()
+    if let Some(matches) = matches.subcommand_matches("new") { new(matches); }
+    if let Some(matches) = matches.subcommand_matches("list") { list(matches); }
+    if let Some(matches) = matches.subcommand_matches("extract") { extract(matches); }
+}
+
+fn new(args: &ArgMatches) {
+    let directory_walker = args.values_of("ifiled").unwrap()
         .flat_map(|f| if cfg!(windows) && f.contains('*') {
             Box::new(glob::glob(f).unwrap().flat_map(|f| extract_directory(&f.unwrap())))
         }
         else { extract_directory(Path::new(f)) });
-    let compression_method = matches.value_of("cmethod").map(|s| match s {
+    let compression_method = args.value_of("cmethod").map(|s| match s {
         "lz4" => par::CompressionMethod::Lz4(0),
         "zlib" => par::CompressionMethod::Zlib(0),
         "zstd11" => par::CompressionMethod::Zstd11(0),
@@ -162,7 +201,7 @@ fn main() {
         let byte_length = archive.2.len() as u64 - relative_offset;
         archive.1.insert(fstr.to_owned(), par::AssetEntryHeadingPair { relative_offset, byte_length });
     }
-    if let Some(ofpath) = matches.value_of("ofile") {
+    if let Some(ofpath) = args.value_of("ofile") {
         archive.write(&mut File::create(ofpath).unwrap()).unwrap();
     }
     else {
