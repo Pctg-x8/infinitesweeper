@@ -1,6 +1,6 @@
 
 extern crate peridot_serialization_utils;
-extern crate clap; extern crate glob; mod par;
+extern crate clap; extern crate glob; mod par; extern crate libc;
 extern crate crc; extern crate lz4; extern crate libflate; extern crate zstd;
 use clap::{App, Arg};
 use std::fs::{metadata, read_dir, read, File};
@@ -26,7 +26,7 @@ fn main() {
     }).unwrap_or(par::CompressionMethod::None);
     let mut archive = par::ArchiveWrite::new(compression_method);
     for f in directory_walker {
-        println!("input <<= {}", f.display());
+        // println!("input <<= {}", f.display());
         let fstr = f.to_str().unwrap();
         if archive.1.contains_key(fstr) {
             eprintln!("Warn: {:?} has already been added", fstr);
@@ -36,9 +36,36 @@ fn main() {
         let byte_length = archive.2.len() as u64 - relative_offset;
         archive.1.insert(fstr.to_owned(), par::AssetEntryHeadingPair { relative_offset, byte_length });
     }
-    let ofpath = matches.value_of("ofile").unwrap();
-    let mut fo = File::create(ofpath).unwrap();
-    archive.write(&mut fo).unwrap();
+    if let Some(ofpath) = matches.value_of("ofile") {
+        archive.write(&mut File::create(ofpath).unwrap()).unwrap();
+    }
+    else {
+        let foptr = unsafe { libc::fdopen(libc::dup(1), "wb\x00".as_ptr() as *const _) };
+        archive.write(&mut NativeOfstream::from_stream_ptr(foptr).unwrap()).unwrap();
+    }
+}
+
+use std::ptr::NonNull;
+struct NativeOfstream(NonNull<libc::FILE>);
+impl NativeOfstream {
+    pub fn from_stream_ptr(p: *mut libc::FILE) -> Option<Self> {
+        NonNull::new(p).map(NativeOfstream)
+    }
+}
+impl Drop for NativeOfstream {
+    fn drop(&mut self) {
+        unsafe { libc::fclose(self.0.as_ptr()); }
+    }
+}
+impl std::io::Write for NativeOfstream {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let written = unsafe { libc::fwrite(buf.as_ptr() as *const _, 1, buf.len() as _, self.0.as_ptr()) };
+        return Ok(written);
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        let code = unsafe { libc::fflush(self.0.as_ptr()) };
+        if code == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+    }
 }
 
 use std::path::{Path, PathBuf}; use std::borrow::ToOwned;

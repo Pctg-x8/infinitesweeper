@@ -445,6 +445,7 @@ dependencies = [
  "clap 2.32.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "crc 1.8.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "glob 0.2.11 (registry+https://github.com/rust-lang/crates.io-index)",
+ "libc 0.2.43 (registry+https://github.com/rust-lang/crates.io-index)",
  "libflate 0.1.16 (registry+https://github.com/rust-lang/crates.io-index)",
  "lz4 1.23.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "peridot-serialization-utils 0.1.0",

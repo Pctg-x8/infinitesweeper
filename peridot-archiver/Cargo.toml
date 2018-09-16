@@ -6,6 +6,7 @@ authors = ["S.Percentage <Syn.Tri.Naga@gmail.com>"]
 [dependencies]
 clap = "2.32"
 glob = "0.2"
+libc = "0.2"
 crc = "1.8"
 lz4 = "1.23"
 libflate = "0.1"
