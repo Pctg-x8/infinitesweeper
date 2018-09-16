@@ -9,6 +9,7 @@ use libflate::deflate as zlib; use lz4; use zstd;
 use crc::crc32;
 
 #[repr(C)] pub struct LinearPaired2u64(u64, u64);
+#[derive(Debug)]
 #[repr(C)] pub struct AssetEntryHeadingPair { pub byte_length: u64, pub relative_offset: u64 }
 impl AssetEntryHeadingPair {
     pub fn write<W: Write>(&self, writer: &mut W) -> IOResult<usize> {
@@ -38,6 +39,7 @@ pub fn write_asset_entries<W: Write>(entries: &HashMap<String, AssetEntryHeading
 }
 
 /// 展開後のサイズが値として入る。圧縮指定時には無視されるので適当な値を指定する
+#[derive(Debug)]
 pub enum CompressionMethod {
     None, Zlib(u64), Lz4(u64), Zstd11(u64)
 }
