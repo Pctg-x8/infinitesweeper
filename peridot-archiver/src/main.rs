@@ -65,13 +65,9 @@ fn new(args: &ArgMatches) {
     for f in directory_walker {
         // println!("input <<= {}", f.display());
         let fstr = f.to_str().unwrap();
-        if archive.1.contains_key(fstr) {
+        if !archive.add(fstr.to_owned(), read(&f).unwrap()) {
             eprintln!("Warn: {:?} has already been added", fstr);
         }
-        let relative_offset = archive.2.len() as _;
-        archive.2.extend(read(&f).unwrap().into_iter());
-        let byte_length = archive.2.len() as u64 - relative_offset;
-        archive.1.insert(fstr.to_owned(), par::AssetEntryHeadingPair { relative_offset, byte_length });
     }
     if let Some(ofpath) = args.value_of("ofile") {
         archive.write(&mut File::create(ofpath).unwrap()).unwrap();

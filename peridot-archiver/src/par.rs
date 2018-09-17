@@ -23,7 +23,7 @@ impl AssetEntryHeadingPair {
         reader.read_exact(unsafe { &mut transmute::<_, &mut [u8; 8 * 2]>(&mut sink)[..] }).map(|_| sink)
     }
 }
-pub fn read_asset_entries<R: BufRead>(reader: &mut R) -> IOResult<HashMap<String, AssetEntryHeadingPair>> {
+fn read_asset_entries<R: BufRead>(reader: &mut R) -> IOResult<HashMap<String, AssetEntryHeadingPair>> {
     let VariableUInt(count) = VariableUInt::read(reader)?;
     if count <= 0 { return Ok(HashMap::new()); }
     let mut elements = HashMap::with_capacity(count as _);
@@ -34,19 +34,13 @@ pub fn read_asset_entries<R: BufRead>(reader: &mut R) -> IOResult<HashMap<String
     }
     return Ok(elements);
 }
-/// return -> written bytes(raw)
-pub fn write_asset_entries<W: Write>(entries: &HashMap<String, AssetEntryHeadingPair>, writer: &mut W) -> IOResult<usize> {
-    let mut written_bytes = VariableUInt(entries.len() as _).write(writer)?;
-    for (n, h) in entries { written_bytes += h.write(writer).and_then(|w1| PascalStr(n).write(writer).map(move |w2| w1 + w2))?; }
-    return Ok(written_bytes);
-}
 
 /// 展開後のサイズが値として入る。圧縮指定時には無視されるので適当な値を指定する
 #[derive(Debug)]
 pub enum CompressionMethod {
     None, Zlib(u64), Lz4(u64), Zstd11(u64)
 }
-pub fn read_file_header<R: BufRead>(reader: &mut R) -> IOResult<(CompressionMethod, u32)> {
+fn read_file_header<R: BufRead>(reader: &mut R) -> IOResult<(CompressionMethod, u32)> {
     let mut signature = [0u8; 4];
     reader.read_exact(&mut signature[..]).map(drop)?;
     let mut sink_64 = 0u64;
@@ -66,29 +60,44 @@ pub fn read_file_header<R: BufRead>(reader: &mut R) -> IOResult<(CompressionMeth
 }
 
 use std::io::Cursor;
-pub struct ArchiveWrite(pub CompressionMethod, pub HashMap<String, AssetEntryHeadingPair>, pub Vec<u8>);
+pub struct ArchiveWrite(CompressionMethod, HashMap<String, AssetEntryHeadingPair>, Vec<u8>);
 impl ArchiveWrite {
     pub fn new(comp: CompressionMethod) -> Self {
         ArchiveWrite(comp, HashMap::new(), Vec::new())
+    }
+    pub fn add(&mut self, name: String, content: Vec<u8>) -> bool {
+        if self.1.contains_key(&name) { return false; }
+        let relative_offset = self.2.len() as u64;
+        self.2.extend(content);
+        self.1.insert(name, AssetEntryHeadingPair { relative_offset, byte_length: self.2.len() as u64 - relative_offset });
+        return true;
+    }
+    /// return -> written bytes(raw)
+    fn write_asset_entries<W: Write>(&self, writer: &mut W) -> IOResult<usize> {
+        let mut written_bytes = VariableUInt(self.1.len() as _).write(writer)?;
+        for (n, h) in &self.1 {
+            written_bytes += h.write(writer).and_then(|w1| PascalStr(n).write(writer).map(move |w2| w1 + w2))?;
+        }
+        return Ok(written_bytes);
     }
     pub fn write<W: Write>(&self, writer: &mut W) -> IOResult<()> {
         match self.0 {
             CompressionMethod::None => {
                 let mut body = Cursor::new(Vec::new());
-                write_asset_entries(&self.1, &mut body)?; body.write_all(&self.2[..])?;
+                self.write_asset_entries(&mut body)?; body.write_all(&self.2[..])?;
 
                 Self::write_common(writer, b"par ", None, &body.into_inner()[..])
             },
             CompressionMethod::Zlib(_) => {
                 let mut body = zlib::Encoder::new(Cursor::new(Vec::new()));
-                let uncompressed_bytes = write_asset_entries(&self.1, &mut body)
+                let uncompressed_bytes = self.write_asset_entries(&mut body)
                     .and_then(|wa| body.write_all(&self.2[..]).map(move |_| wa + self.2.len()))? as u64;
 
                 Self::write_common(writer, b"pard", Some(uncompressed_bytes), &body.finish().into_result()?.into_inner()[..])
             }
             CompressionMethod::Lz4(_) => {
                 let mut body = lz4::EncoderBuilder::new().build(Cursor::new(Vec::new()))?;
-                let uncompressed_bytes = write_asset_entries(&self.1, &mut body)
+                let uncompressed_bytes = self.write_asset_entries(&mut body)
                     .and_then(|wa| body.write_all(&self.2[..]).map(move |_| wa + self.2.len()))? as u64;
                 let (body, r) = body.finish(); r?;
 
@@ -96,7 +105,7 @@ impl ArchiveWrite {
             },
             CompressionMethod::Zstd11(_) => {
                 let mut body = zstd::Encoder::new(Cursor::new(Vec::new()), 11)?;
-                let uncompressed_bytes = write_asset_entries(&self.1, &mut body)
+                let uncompressed_bytes = self.write_asset_entries(&mut body)
                     .and_then(|wa| body.write_all(&self.2[..]).map(move |_| wa + self.2.len()))? as u64;
                 
                 Self::write_common(writer, b"par1", Some(uncompressed_bytes), &body.finish()?.into_inner()[..])
