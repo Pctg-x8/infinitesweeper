@@ -5,6 +5,7 @@ authors = ["S.Percentage <Syn.Tri.Naga@gmail.com>"]
 build = "build.rs"
 
 [dependencies]
+peridot = { path = "peridot-engine" }
 bedrock = { git = "https://github.com/Pctg-x8/bedrock", features = ["Presentation", "Implements"] }
 libc = "0.2"
 log = "0.4"
@@ -12,7 +13,6 @@ env_logger = "0.5"
 regex = "1.0"
 bitflags = "1.0"
 peridot-vertex-processing-pack = { path = "peridot-vertex-processing-pack" }
-pathfinder_partitioner = { path = "extras/pathfinder/partitioner" }
 # font-kit = { git = "https://github.com/pcwalton/font-kit" }
 
 [target.'cfg(target_os = "android")'.dependencies]
@@ -24,4 +24,4 @@ features = ["winuser", "libloaderapi", "hidusage"]
 
 [workspace]
 exclude = ["extras/"]
-members = ["peridot-serialization-utils", "peridot-archiver"]
+members = ["peridot-serialization-utils", "peridot-archiver", "peridot-engine"]

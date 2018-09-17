@@ -103,7 +103,7 @@ impl PvpContainerReader<BufReader<File>> {
 }
 
 trait BinarySerializeVkStructures {
-    fn binary_serialize<W: Write>(&self, sink: &mut W) -> IOResult<()>;
+    fn binary_serialize<W: Write>(&self, sink: &mut W) -> IOResult<usize>;
     fn binary_unserialize<R: BufRead>(source: &mut R) -> IOResult<Self> where Self: Sized;
     fn serialize_into_memory(&self) -> IOResult<Vec<u8>> {
         let mut sink = Cursor::new(Vec::new());
@@ -111,10 +111,10 @@ trait BinarySerializeVkStructures {
     }
 }
 impl BinarySerializeVkStructures for br::vk::VkVertexInputBindingDescription {
-    fn binary_serialize<W: Write>(&self, sink: &mut W) -> IOResult<()> {
-        VariableUInt(self.inputRate as _).write(sink)?;
-        VariableUInt(self.binding as _).write(sink)?;
-        VariableUInt(self.stride as _).write(sink)
+    fn binary_serialize<W: Write>(&self, sink: &mut W) -> IOResult<usize> {
+        VariableUInt(self.inputRate as _).write(sink)
+            .and_then(|w0| VariableUInt(self.binding as _).write(sink).map(move |w1| w1 + w0))
+            .and_then(|w0| VariableUInt(self.stride as _).write(sink).map(move |w1| w1 + w0))
     }
     fn binary_unserialize<R: BufRead>(source: &mut R) -> IOResult<Self> where Self: Sized {
         let VariableUInt(input_rate) = VariableUInt::read(source)?;
@@ -126,11 +126,11 @@ impl BinarySerializeVkStructures for br::vk::VkVertexInputBindingDescription {
     }
 }
 impl BinarySerializeVkStructures for br::vk::VkVertexInputAttributeDescription {
-    fn binary_serialize<W: Write>(&self, sink: &mut W) -> IOResult<()> {
-        VariableUInt(self.location as _).write(sink)?;
-        VariableUInt(self.binding as _).write(sink)?;
-        VariableUInt(self.offset as _).write(sink)?;
-        VariableUInt(self.format as _).write(sink)
+    fn binary_serialize<W: Write>(&self, sink: &mut W) -> IOResult<usize> {
+        VariableUInt(self.location as _).write(sink)
+            .and_then(|w0| VariableUInt(self.binding as _).write(sink).map(move |w1| w1 + w0))
+            .and_then(|w0| VariableUInt(self.offset as _).write(sink).map(move |w1| w1 + w0))
+            .and_then(|w0| VariableUInt(self.format as _).write(sink).map(move |w1| w1 + w0))
     }
     fn binary_unserialize<R: BufRead>(source: &mut R) -> IOResult<Self> where Self: Sized {
         let VariableUInt(location) = VariableUInt::read(source)?;
@@ -144,9 +144,9 @@ impl BinarySerializeVkStructures for br::vk::VkVertexInputAttributeDescription {
     }
 }
 impl<T: BinarySerializeVkStructures> BinarySerializeVkStructures for Vec<T> {
-    fn binary_serialize<W: Write>(&self, sink: &mut W) -> IOResult<()> {
-        VariableUInt(self.len() as _).write(sink)?;
-        for x in self { x.binary_serialize(sink)?; } return Ok(());
+    fn binary_serialize<W: Write>(&self, sink: &mut W) -> IOResult<usize> {
+        let mut write_bytes = VariableUInt(self.len() as _).write(sink)?;
+        for x in self { write_bytes += x.binary_serialize(sink)?; } return Ok(write_bytes);
     }
     fn binary_unserialize<R: BufRead>(source: &mut R) -> IOResult<Self> where Self: Sized {
         let VariableUInt(element_count) = VariableUInt::read(source)?;
@@ -156,8 +156,9 @@ impl<T: BinarySerializeVkStructures> BinarySerializeVkStructures for Vec<T> {
     }
 }
 impl BinarySerializeVkStructures for Vec<u8> {
-    fn binary_serialize<W: Write>(&self, sink: &mut W) -> IOResult<()> {
-        VariableUInt(self.len() as _).write(sink)?; sink.write(self).map(drop)
+    fn binary_serialize<W: Write>(&self, sink: &mut W) -> IOResult<usize> {
+        VariableUInt(self.len() as _).write(sink)
+            .and_then(|w0| sink.write_all(self).map(move |_| self.len() + w0))
     }
     fn binary_unserialize<R: BufRead>(source: &mut R) -> IOResult<Self> where Self: Sized {
         let VariableUInt(element_count) = VariableUInt::read(source)?;
