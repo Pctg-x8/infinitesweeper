@@ -1,21 +1,24 @@
 //! Peridot Archive
 
 use peridot_serialization_utils::*;
-use std::io::prelude::{Write, BufRead};
+use std::io::prelude::{Write, Read, BufRead};
 use std::io::{Result as IOResult, Error as IOError, ErrorKind};
-use std::mem::transmute;
+use std::io::{SeekFrom, Seek, BufReader};
+use std::fs::File;
+use std::mem::{transmute, replace};
 use std::collections::HashMap;
 use libflate::deflate as zlib; use lz4; use zstd;
 use crc::crc32;
+use std::path::Path;
 
 #[repr(C)] pub struct LinearPaired2u64(u64, u64);
 #[derive(Debug)]
-#[repr(C)] pub struct AssetEntryHeadingPair { pub byte_length: u64, pub relative_offset: u64 }
+#[repr(C)] struct AssetEntryHeadingPair { pub byte_length: u64, pub relative_offset: u64 }
 impl AssetEntryHeadingPair {
-    pub fn write<W: Write>(&self, writer: &mut W) -> IOResult<usize> {
+    fn write<W: Write>(&self, writer: &mut W) -> IOResult<usize> {
         writer.write(unsafe { &transmute::<_, &[u8; 8 * 2]>(self)[..] }).map(|_| 16)
     }
-    pub fn read<R: BufRead>(reader: &mut R) -> IOResult<Self> {
+    fn read<R: BufRead>(reader: &mut R) -> IOResult<Self> {
         let mut sink = AssetEntryHeadingPair { byte_length: 0, relative_offset: 0 };
         reader.read_exact(unsafe { &mut transmute::<_, &mut [u8; 8 * 2]>(&mut sink)[..] }).map(|_| sink)
     }
@@ -108,4 +111,139 @@ impl ArchiveWrite {
         writer.write_all(unsafe { &transmute::<_, &[u8; 4]>(&checksum)[..] })?;
         writer.write_all(body)
     }
+}
+
+enum WhereArchive { OnMemory(Vec<u8>), FromIO(BufReader<File>) }
+impl WhereArchive {
+    pub fn on_memory(&mut self) -> IOResult<&[u8]> {
+        let replace_buf = if let WhereArchive::FromIO(ref mut r) = self {
+            let mut buf = Vec::new();
+            r.read_to_end(&mut buf)?; Some(buf)
+        }
+        else { None };
+        if let Some(b) = replace_buf { replace(self, WhereArchive::OnMemory(b)); }
+        match self {
+            WhereArchive::OnMemory(ref b) => Ok(b), _ => unreachable!()
+        }
+    }
+}
+enum EitherArchiveReader { OnMemory(Cursor<Vec<u8>>), FromIO(BufReader<File>) }
+impl EitherArchiveReader {
+    pub fn new(a: WhereArchive) -> Self {
+        match a {
+            WhereArchive::FromIO(r) => EitherArchiveReader::FromIO(r),
+            WhereArchive::OnMemory(b) => EitherArchiveReader::OnMemory(Cursor::new(b))
+        }
+    }
+    pub fn unwrap(self) -> WhereArchive {
+        match self {
+            EitherArchiveReader::FromIO(r) => WhereArchive::FromIO(r),
+            EitherArchiveReader::OnMemory(c) => WhereArchive::OnMemory(c.into_inner())
+        }
+    }
+}
+impl Read for EitherArchiveReader {
+    fn read(&mut self, buf: &mut [u8]) -> IOResult<usize> {
+        match self {
+            EitherArchiveReader::FromIO(ref mut r) => r.read(buf),
+            EitherArchiveReader::OnMemory(ref mut c) => c.read(buf)
+        }
+    }
+}
+impl BufRead for EitherArchiveReader {
+    fn fill_buf(&mut self) -> IOResult<&[u8]> {
+        match self {
+            EitherArchiveReader::FromIO(ref mut r) => r.fill_buf(),
+            EitherArchiveReader::OnMemory(ref mut c) => c.fill_buf()
+        }
+    }
+    fn consume(&mut self, amt: usize) {
+        match self {
+            EitherArchiveReader::FromIO(ref mut r) => r.consume(amt),
+            EitherArchiveReader::OnMemory(ref mut c) => c.consume(amt)
+        }
+    }
+}
+impl Seek for EitherArchiveReader {
+    fn seek(&mut self, pos: SeekFrom) -> IOResult<u64> {
+        match self {
+            EitherArchiveReader::FromIO(ref mut r) => r.seek(pos),
+            EitherArchiveReader::OnMemory(ref mut c) => c.seek(pos)
+        }
+    }
+}
+
+pub struct ArchiveRead {
+    entries: HashMap<String, AssetEntryHeadingPair>, content: EitherArchiveReader,
+    content_baseptr: u64
+}
+impl ArchiveRead {
+    pub fn from_file<P: AsRef<Path>>(path: P, check_integrity: bool) -> IOResult<Self> {
+        let mut fi = File::open(path).map(BufReader::new).unwrap();
+        let (comp, crc) = read_file_header(&mut fi).unwrap();
+        // println!("Compression Method: {:?}", comp);
+        // println!("Checksum: 0x{:08x}", crc);
+        let mut body = WhereArchive::FromIO(fi);
+        if check_integrity {
+            // std::io::stdout().write_all(b"Checking archive integrity...").unwrap();
+            // std::io::stdout().flush().unwrap();
+            let input_crc = crc32::checksum_ieee(&body.on_memory().unwrap()[..]);
+            if input_crc != crc {
+                panic!("Checking Integrity Failed: Mismatching CRC-32: input=0x{:08x}", input_crc);
+            }
+            // println!(" ok");
+        }
+        match comp {
+            CompressionMethod::Lz4(ub) => {
+                let mut sink = Vec::with_capacity(ub as _);
+                let mut decoder = lz4::Decoder::new(EitherArchiveReader::new(body)).unwrap();
+                decoder.read_to_end(&mut sink).unwrap();
+                body = WhereArchive::OnMemory(sink);
+            },
+            CompressionMethod::Zlib(ub) => {
+                let mut sink = Vec::with_capacity(ub as _);
+                let mut reader = EitherArchiveReader::new(body);
+                let mut decoder = zlib::Decoder::new(reader);
+                decoder.read_to_end(&mut sink).unwrap();
+                body = WhereArchive::OnMemory(sink);
+            },
+            CompressionMethod::Zstd11(ub) => {
+                let mut sink = Vec::with_capacity(ub as _);
+                let mut decoder = zstd::Decoder::new(EitherArchiveReader::new(body)).unwrap();
+                decoder.read_to_end(&mut sink).unwrap();
+                body = WhereArchive::OnMemory(sink);
+            },
+            _ => ()
+        }
+        let mut areader = EitherArchiveReader::new(body);
+        let entries = read_asset_entries(&mut areader).unwrap();
+        /*for (n, d) in &entries {
+            println!("- {}: {} {}", n, d.relative_offset, d.byte_length);
+        }*/
+        let content_baseptr = areader.seek(SeekFrom::Current(0)).unwrap();
+
+        return Ok(ArchiveRead {
+            entries, content: areader, content_baseptr
+        });
+    }
+
+    pub fn read_bin(&mut self, path: &str) -> IOResult<Option<Vec<u8>>> {
+        if let Some(entry_pair) = self.entries.get(path) {
+            self.content.seek(SeekFrom::Start(self.content_baseptr + entry_pair.relative_offset))?;
+            let mut sink = Vec::with_capacity(entry_pair.byte_length as _);
+            unsafe { sink.set_len(entry_pair.byte_length as _); }
+            self.content.read_exact(&mut sink)?;
+            return Ok(Some(sink));
+        }
+        else { return Ok(None); }
+    }
+    pub fn entry_names(&self) -> ArchiveEntryIterator {
+        ArchiveEntryIterator(self.entries.keys())
+    }
+}
+use std::collections::hash_map::Keys;
+pub struct ArchiveEntryIterator<'a>(Keys<'a, String, AssetEntryHeadingPair>);
+impl<'a> Iterator for ArchiveEntryIterator<'a> {
+    type Item = &'a str;
+    fn next(&mut self) -> Option<&'a str> { self.0.next().map(|a| a.as_str()) }
 }
